@@ -1,27 +1,37 @@
 # Wakwito Laundry
 
+
 React + Vite frontend backed by an Express API and SQLite database.
 
+
 ## Requirements
+
 
 - Node.js 22 or later
 - npm
 
+
 ## Local development
+
 
 1. Copy `.env.example` to `.env`.
 2. Install packages with `npm install`.
 3. Start both the API and frontend:
 
+
    ```sh
    npm run dev
    ```
 
-The frontend is at `http://localhost:5173`. Vite proxies `/api` requests to the Express server at `http://localhost:3000`. The SQLite database is created at `.data/wakwito.sqlite`.
+
+The frontend is at `http://localhost:5173`. Vite proxies `/api` requests to the Express server at `http://127.0.0.1:3000`. The SQLite database is created at `.data/wakwito.sqlite`.
+
 
 With the development servers running, use `npm run test:api` to exercise session authentication, customer order access, server-side pricing, admin status updates, and persistence.
 
+
 Development starts with these demo accounts:
+
 
 | Role | Email | Password |
 | --- | --- | --- |
@@ -29,9 +39,12 @@ Development starts with these demo accounts:
 | Admin | `admin@wakwito.co.ke` | `admin123` |
 | Driver | `driver@wakwito.co.ke` | `driver123` |
 
+
 Demo users are seeded only outside production. Passwords are stored as bcrypt hashes. New sign-ups create customer accounts; only admins can change order statuses.
 
+
 ## Production
+
 
 1. Set `NODE_ENV=production`.
 2. Set `JWT_SECRET` to a unique, cryptographically random secret (at least 32 random bytes).
@@ -40,9 +53,18 @@ Demo users are seeded only outside production. Passwords are stored as bcrypt ha
 5. Run `npm install`, `npm run build`, then `npm start`.
 6. Serve over HTTPS. Production session cookies are HttpOnly, Secure, and SameSite=Lax.
 
+
 The Express server serves the built frontend and the `/api` endpoints from the same origin in production. Use a persistent volume for the database when deploying to a container or hosting platform; ephemeral filesystems do not preserve SQLite data across redeployments.
 
+
+## GitHub Pages preview
+
+
+The GitHub Pages workflow builds and publishes the static frontend at https://pirateapostle.github.io/Wakwito-Laundry/. Sign-in, ordering, and tracking require the Express API and SQLite database and are unavailable on this static preview.
+
+
 ## API overview
+
 
 - `GET /api/health` — health check
 - `POST /api/auth/signup` — create a customer account
@@ -52,3 +74,4 @@ The Express server serves the built frontend and the `/api` endpoints from the s
 - `GET /api/orders` — list the signed-in customer’s orders; admins and drivers can view all orders
 - `POST /api/orders` — create an order; item prices and totals are calculated by the server
 - `PATCH /api/orders/:orderCode/status` — admin-only order status update
+
