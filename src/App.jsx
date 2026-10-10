@@ -165,6 +165,9 @@ function AppLayout() {
                 <NavLink to="/order-tracking" className="nav-link">
                   Tracking
                 </NavLink>
+                <NavLink to="/account" className="nav-link">
+                  Account
+                </NavLink>
                 <button type="button" className="button ghost-button small-button" onClick={() => logout().catch(console.error)}>
                   Log out
                 </button>
@@ -208,6 +211,14 @@ function AppLayout() {
           <Route path="/" element={<HomePage />} />
           <Route path="/signin" element={<SignInPage />} />
           <Route path="/signup" element={<SignUpPage />} />
+          <Route
+            path="/account"
+            element={
+              <ProtectedRoute allowedRoles={['CUSTOMER', 'ADMIN', 'DRIVER']}>
+                <AccountPage />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/dashboard"
             element={
@@ -262,6 +273,163 @@ function AppLayout() {
 
       <Footer />
     </>
+  );
+}
+
+function AccountPage() {
+  const { user, updateProfile } = useAuth();
+  const [form, setForm] = useState({
+    name: user?.name || '',
+    username: user?.username || '',
+    phone: user?.phone || '',
+    location: user?.location || '',
+    profilePhoto: user?.profilePhoto || null,
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    setForm({
+      name: user?.name || '',
+      username: user?.username || '',
+      phone: user?.phone || '',
+      location: user?.location || '',
+      profilePhoto: user?.profilePhoto || null,
+    });
+  }, [user]);
+
+  const handleChange = (event) => {
+    const { name, value } = event.target;
+    setForm((current) => ({ ...current, [name]: value }));
+    setSaved(false);
+  };
+
+  const handlePhotoChange = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
+      setError('Choose a PNG, JPEG, or WebP profile photo.');
+      return;
+    }
+    if (file.size > 512 * 1024) {
+      setError('Profile photos must be 512 KB or smaller.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setForm((current) => ({ ...current, profilePhoto: reader.result }));
+      setError('');
+      setSaved(false);
+    };
+    reader.onerror = () => setError('Unable to read this photo. Please choose another file.');
+    reader.readAsDataURL(file);
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    setSaved(false);
+    try {
+      await updateProfile(form);
+      setSaved(true);
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="auth-shell">
+      <div className="container auth-panel single-form">
+        <form className="form-card wider account-form" onSubmit={handleSubmit}>
+          <span className="eyebrow">Your account</span>
+          <h2>Profile details</h2>
+          <div className="account-photo-editor">
+            {form.profilePhoto ? (
+              <img src={form.profilePhoto} alt="Profile preview" className="account-photo-preview" />
+            ) : (
+              <div className="account-photo-preview account-photo-placeholder" aria-hidden="true">
+                <UserCircle2 size={40} />
+              </div>
+            )}
+            <div>
+              <label className="button secondary-button account-photo-label">
+                Change photo
+                <input type="file" accept="image/png,image/jpeg,image/webp" onChange={handlePhotoChange} />
+              </label>
+              <p className="muted-text">PNG, JPEG, or WebP. Maximum 512 KB.</p>
+              {form.profilePhoto ? (
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() => {
+                    setForm((current) => ({ ...current, profilePhoto: null }));
+                    setSaved(false);
+                  }}
+                >
+                  Remove photo
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="two-col">
+            <label>
+              Full name
+              <input name="name" value={form.name} onChange={handleChange} maxLength={100} required />
+            </label>
+            <label>
+              Username
+              <input
+                name="username"
+                value={form.username}
+                onChange={handleChange}
+                minLength={3}
+                maxLength={24}
+                pattern="[A-Za-z0-9_]{3,24}"
+                autoCapitalize="none"
+                required
+              />
+              <small>3–24 letters, numbers, or underscores.</small>
+            </label>
+          </div>
+
+          <div className="two-col">
+            <label>
+              Phone number
+              <input name="phone" type="tel" value={form.phone} onChange={handleChange} maxLength={20} required />
+            </label>
+            <label>
+              Location
+              <input
+                name="location"
+                value={form.location}
+                onChange={handleChange}
+                maxLength={240}
+                placeholder="Area, estate, or neighborhood"
+              />
+            </label>
+          </div>
+
+          <label>
+            Email address
+            <input type="email" value={user?.email || ''} readOnly />
+            <small>Email changes are not available here.</small>
+          </label>
+
+          {error ? <p className="error-text" role="alert">{error}</p> : null}
+          {saved ? <p className="success-text" role="status">Your account details have been updated.</p> : null}
+          <button type="submit" className="button primary-button full-width" disabled={saving}>
+            {saving ? 'Saving profile…' : 'Save changes'}
+          </button>
+        </form>
+      </div>
+    </section>
   );
 }
 
@@ -592,8 +760,8 @@ function SignInPage() {
         <form className="form-card" onSubmit={handleSubmit}>
           <h2>Sign In</h2>
           <label>
-            Email / Phone Number
-            <input name="identifier" type="text" value={form.identifier} onChange={handleChange} placeholder="e.g. mainoo@wakwito.co.ke" />
+            Email / Phone / Username
+            <input name="identifier" type="text" value={form.identifier} onChange={handleChange} placeholder="Email, phone, or username" />
           </label>
 
           <label>
@@ -773,16 +941,22 @@ function DashboardPage() {
         <aside className="sidebar-panel">
           <div className="profile-header">
             <div className="avatar-circle">
-              <UserCircle2 size={28} />
+              {user?.profilePhoto ? (
+                <img src={user.profilePhoto} alt="" className="avatar-image" />
+              ) : (
+                <UserCircle2 size={28} />
+              )}
             </div>
             <div>
               <span>Customer account</span>
               <strong>{user?.name || 'Mainoo Kibet'}</strong>
+              {user?.username ? <span>@{user.username}</span> : null}
             </div>
           </div>
 
           <div className="side-block">
             <h3>Quick actions</h3>
+            <Link to="/account" className="button secondary-button full-width">Edit account details</Link>
             <Link to="/new-order" className="button primary-button full-width">Place New Order</Link>
             <Link to="/order-tracking" className="button secondary-button full-width">View service history</Link>
           </div>

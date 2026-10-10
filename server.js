@@ -59,6 +59,34 @@ database.exec(`
   CREATE INDEX IF NOT EXISTS orders_customer_user_id_idx ON orders(customer_user_id);
 `);
 
+const userColumns = new Set(database.pragma('table_info(users)').map((column) => column.name));
+if (!userColumns.has('username')) database.exec('ALTER TABLE users ADD COLUMN username TEXT');
+if (!userColumns.has('location')) database.exec("ALTER TABLE users ADD COLUMN location TEXT NOT NULL DEFAULT ''");
+if (!userColumns.has('profile_photo')) database.exec('ALTER TABLE users ADD COLUMN profile_photo TEXT');
+
+function usernameFromEmail(email) {
+  const localPart = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
+  return (localPart.length >= 3 ? localPart : `user_${localPart}`).slice(0, 24);
+}
+
+const existingUsernames = new Set(
+  database.prepare('SELECT username FROM users WHERE username IS NOT NULL').all()
+    .map(({ username }) => username.toLowerCase()),
+);
+const updateUsername = database.prepare('UPDATE users SET username = ? WHERE id = ?');
+for (const user of database.prepare('SELECT id, email FROM users WHERE username IS NULL ORDER BY id').all()) {
+  const base = usernameFromEmail(user.email);
+  let username = base;
+  let suffix = 2;
+  while (existingUsernames.has(username.toLowerCase())) {
+    const suffixText = String(suffix++);
+    username = `${base.slice(0, 24 - suffixText.length)}${suffixText}`;
+  }
+  updateUsername.run(username, user.id);
+  existingUsernames.add(username.toLowerCase());
+}
+database.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_username_unique_idx ON users(username COLLATE NOCASE)');
+
 const serviceCatalog = {
   washing: { name: 'Washing', pricePerKg: 99 },
   'dry-cleaning': { name: 'Dry Cleaning', pricePerKg: 180 },
@@ -79,7 +107,21 @@ function publicUser(user) {
     email: user.email,
     phone: user.phone,
     role: user.role,
+    username: user.username,
+    location: user.location,
+    profilePhoto: user.profile_photo,
   };
+}
+
+function makeUniqueUsername(email) {
+  const base = usernameFromEmail(email);
+  let username = base;
+  let suffix = 2;
+  while (database.prepare('SELECT 1 FROM users WHERE username = ? COLLATE NOCASE').get(username)) {
+    const suffixText = String(suffix++);
+    username = `${base.slice(0, 24 - suffixText.length)}${suffixText}`;
+  }
+  return username;
 }
 
 function sendError(response, status, message) {
@@ -112,7 +154,10 @@ function authenticate(request, response, next) {
 
   try {
     const payload = jwt.verify(token, jwtSecret);
-    const user = database.prepare('SELECT id, name, email, phone, role FROM users WHERE id = ?').get(payload.sub);
+    const user = database.prepare(`
+      SELECT id, name, email, phone, role, username, location, profile_photo
+      FROM users WHERE id = ?
+    `).get(payload.sub);
     if (!user) return sendError(response, 401, 'Your session is no longer valid. Please sign in again.');
     request.user = user;
     return next();
@@ -150,9 +195,9 @@ function seedUser({ name, email, phone, password, role }) {
   const existingUser = database.prepare('SELECT id FROM users WHERE email = ?').get(email);
   if (existingUser) return existingUser.id;
   const result = database.prepare(`
-    INSERT INTO users (name, email, phone, password_hash, role)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(name, email, phone, bcrypt.hashSync(password, 12), role);
+    INSERT INTO users (name, email, phone, password_hash, role, username)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(name, email, phone, bcrypt.hashSync(password, 12), role, makeUniqueUsername(email));
   return Number(result.lastInsertRowid);
 }
 
@@ -272,7 +317,7 @@ function seedDemoData() {
 seedDemoData();
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '32kb' }));
+app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
 app.get('/api/health', (_request, response) => {
@@ -285,13 +330,13 @@ app.post('/api/auth/login', (request, response) => {
   if (!identifier || !password) return sendError(response, 400, 'Email/phone and password are required.');
 
   const user = database.prepare(`
-    SELECT id, name, email, phone, role, password_hash
+    SELECT id, name, email, phone, role, username, location, profile_photo, password_hash
     FROM users
-    WHERE email = ? COLLATE NOCASE OR phone = ?
-  `).get(identifier, identifier);
+    WHERE email = ? COLLATE NOCASE OR phone = ? OR username = ? COLLATE NOCASE
+  `).get(identifier, identifier, identifier);
 
   if (!user || !bcrypt.compareSync(password, user.password_hash)) {
-    return sendError(response, 401, 'Incorrect email/phone or password.');
+    return sendError(response, 401, 'Incorrect email, phone, username, or password.');
   }
 
   setSessionCookie(response, user, request.body?.remember !== false);
@@ -311,10 +356,10 @@ app.post('/api/auth/signup', (request, response) => {
 
   try {
     const result = database.prepare(`
-      INSERT INTO users (name, email, phone, password_hash, role)
-      VALUES (?, ?, ?, ?, 'CUSTOMER')
-    `).run(name, email, phone, bcrypt.hashSync(password, 12));
-    const user = database.prepare('SELECT id, name, email, phone, role FROM users WHERE id = ?')
+      INSERT INTO users (name, email, phone, password_hash, role, username)
+      VALUES (?, ?, ?, ?, 'CUSTOMER', ?)
+    `).run(name, email, phone, bcrypt.hashSync(password, 12), makeUniqueUsername(email));
+    const user = database.prepare('SELECT id, name, email, phone, role, username, location, profile_photo FROM users WHERE id = ?')
       .get(Number(result.lastInsertRowid));
     setSessionCookie(response, user);
     return response.status(201).json({ user: publicUser(user) });
@@ -333,6 +378,70 @@ app.post('/api/auth/logout', (_request, response) => {
 
 app.get('/api/auth/me', authenticate, (request, response) => {
   response.json({ user: publicUser(request.user) });
+});
+
+app.put('/api/auth/profile', authenticate, (request, response) => {
+  const name = typeof request.body?.name === 'string' ? request.body.name.trim() : '';
+  const username = typeof request.body?.username === 'string' ? request.body.username.trim().toLowerCase() : '';
+  const phone = typeof request.body?.phone === 'string' ? request.body.phone.trim() : '';
+  const location = typeof request.body?.location === 'string' ? request.body.location.trim() : '';
+  const profilePhoto = request.body?.profilePhoto;
+
+  if (!name || name.length > 100) return sendError(response, 400, 'Enter a valid full name.');
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) {
+    return sendError(response, 400, 'Username must be 3–24 characters using letters, numbers, or underscores.');
+  }
+  if (!/^[+]?[\d\s()-]{7,20}$/.test(phone)) return sendError(response, 400, 'Enter a valid phone number.');
+  if (location.length > 240) return sendError(response, 400, 'Location must be 240 characters or fewer.');
+
+  let photo = request.user.profile_photo;
+  if (profilePhoto === null) {
+    photo = null;
+  } else if (typeof profilePhoto === 'string') {
+    const match = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/.exec(profilePhoto);
+    if (!match) return sendError(response, 400, 'Choose a PNG, JPEG, or WebP profile photo.');
+    const imageBytes = Buffer.from(match[2], 'base64');
+    if (imageBytes.length > 512 * 1024 || imageBytes.toString('base64') !== match[2]) {
+      return sendError(response, 400, 'Profile photos must be valid images no larger than 512 KB.');
+    }
+    const signatureMatches = match[1] === 'png'
+      ? imageBytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+      : match[1] === 'jpeg'
+        ? imageBytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))
+        : imageBytes.toString('ascii', 0, 4) === 'RIFF' && imageBytes.toString('ascii', 8, 12) === 'WEBP';
+    if (!signatureMatches) return sendError(response, 400, 'The selected file is not a valid PNG, JPEG, or WebP image.');
+    photo = profilePhoto;
+  } else if (profilePhoto !== undefined) {
+    return sendError(response, 400, 'Profile photo is invalid.');
+  }
+
+  const conflictingUser = database.prepare(`
+    SELECT username FROM users
+    WHERE (username = ? COLLATE NOCASE OR phone = ?) AND id != ?
+  `).get(username, phone, request.user.id);
+  if (conflictingUser) {
+    return sendError(response, 409, conflictingUser.username?.toLowerCase() === username
+      ? 'That username is already in use.'
+      : 'That phone number is already in use.');
+  }
+
+  try {
+    database.prepare(`
+      UPDATE users SET name = ?, username = ?, phone = ?, location = ?, profile_photo = ?
+      WHERE id = ?
+    `).run(name, username, phone, location, photo, request.user.id);
+  } catch (error) {
+    if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
+      return sendError(response, 409, 'That username or phone number is already in use.');
+    }
+    throw error;
+  }
+
+  const user = database.prepare(`
+    SELECT id, name, email, phone, role, username, location, profile_photo
+    FROM users WHERE id = ?
+  `).get(request.user.id);
+  return response.json({ user: publicUser(user) });
 });
 
 app.get('/api/orders', authenticate, (request, response) => {

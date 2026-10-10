@@ -35,6 +35,69 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+.account-photo-editor {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 22px;
+}
+
+.account-photo-preview {
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: 24px;
+}
+
+.account-photo-placeholder {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(11, 99, 216, 0.08);
+}
+
+.account-photo-label {
+  position: relative;
+  overflow: hidden;
+  margin: 0 !important;
+}
+
+.account-photo-label input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.account-photo-editor .muted-text,
+.form-card label small {
+  display: block;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 400;
+}
+
+.text-button {
+  border: 0;
+  padding: 0;
+  color: var(--primary);
+  background: transparent;
+  font-weight: 700;
+}
+
+.success-text {
+  margin: 0 0 18px;
+  color: #12805c;
+  font-weight: 700;
+}
+
+:root[data-theme='dark'] .success-text {
+  color: var(--accent);
+}
+
 :root[data-theme='dark'] {
   --bg: #071827;
   --surface: #10263d;
@@ -1371,6 +1434,12 @@ faq-list p {
   border-radius: 16px;
   color: var(--secondary);
   background: rgba(11, 99, 216, 0.08);
+}
+
+.avatar-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .accent-bg {

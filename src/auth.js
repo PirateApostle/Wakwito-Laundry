@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { apiRequest } from './api';
+import { apiRequest, updateProfile as updateProfileRequest } from './api';
 
 const AuthContext = createContext(null);
 
@@ -50,6 +50,12 @@ export function AuthProvider({ children }) {
     return nextUser;
   };
 
+  const updateProfile = async (profile) => {
+    const nextUser = await updateProfileRequest(profile);
+    setUser(nextUser);
+    return nextUser;
+  };
+
   const logout = async () => {
     try {
       await apiRequest('/auth/logout', { method: 'POST' });
@@ -58,7 +64,7 @@ export function AuthProvider({ children }) {
     }
   };
 
-  const value = useMemo(() => ({ user, loading, login, signup, logout }), [user, loading]);
+  const value = useMemo(() => ({ user, loading, login, signup, updateProfile, logout }), [user, loading]);
 
   return React.createElement(AuthContext.Provider, { value }, children);
 }

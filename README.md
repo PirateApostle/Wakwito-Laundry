@@ -68,10 +68,10 @@ The GitHub Pages workflow builds and publishes the static frontend at https://pi
 
 - `GET /api/health` — health check
 - `POST /api/auth/signup` — create a customer account
-- `POST /api/auth/login` — authenticate by email or phone
+- `POST /api/auth/login` — authenticate by email, phone, or username
 - `POST /api/auth/logout` — clear the session cookie
 - `GET /api/auth/me` — restore the current session
+- `PUT /api/auth/profile` — update the signed-in user’s name, unique username, phone, location, and profile photo
 - `GET /api/orders` — list the signed-in customer’s orders; admins and drivers can view all orders
 - `POST /api/orders` — create an order; item prices and totals are calculated by the server
 - `PATCH /api/orders/:orderCode/status` — admin-only order status update
-

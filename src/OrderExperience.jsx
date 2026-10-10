@@ -167,7 +167,7 @@ export function CheckoutPage() {
   const [form, setForm] = useState({
     customerName: user?.name || '',
     phone: user?.phone || '',
-    address: 'Kilimani, Nairobi',
+    address: user?.location || '',
     fulfillment: 'Pickup + Delivery',
     paymentMethod: 'M-Pesa',
     notes: '',

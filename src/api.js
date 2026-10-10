@@ -52,6 +52,11 @@ export async function updateOrderStatus(orderCode, status) {
   return payload.order;
 }
 
+export async function updateProfile(profile) {
+  const payload = await apiRequest('/auth/profile', { method: 'PUT', body: profile });
+  return payload.user;
+}
+
 export function readCart() {
   try {
     return JSON.parse(localStorage.getItem('wakwito-cart') || '[]');
