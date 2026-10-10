@@ -15,6 +15,19 @@ function cookieFrom(response) {
   return cookie.split(';', 1)[0];
 }
 
+function getDateOffset(offset) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === 'year').value);
+  const month = Number(parts.find((part) => part.type === 'month').value);
+  const day = Number(parts.find((part) => part.type === 'day').value);
+  return new Date(Date.UTC(year, month - 1, day + offset)).toISOString().slice(0, 10);
+}
+
 async function request(path, { cookie, ...options } = {}) {
   const headers = new Headers(options.headers);
   if (options.body) headers.set('content-type', 'application/json');
@@ -112,27 +125,60 @@ try {
   });
   assert.equal(invalidPhoto.response.status, 400);
 
+  const scheduledDate = getDateOffset(3);
+  const orderBody = {
+    customerName: 'API Integration Test',
+    phone: testPhone,
+    address: 'Nairobi West, Nairobi',
+    mapUrl: 'https://maps.app.goo.gl/examplePin',
+    fulfillment: 'Pickup + Delivery',
+    paymentMethod: 'M-Pesa',
+    scheduledDate,
+    timeSlot: 'Morning (8am–12pm)',
+    notes: 'API test order',
+    items: [{ id: 'washing', kg: 1.5, quantity: 2 }],
+  };
+  const invalidSchedule = await request('/orders', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { ...orderBody, scheduledDate: '2000-01-01' },
+  });
+  assert.equal(invalidSchedule.response.status, 400);
+
+  const invalidTimeSlot = await request('/orders', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { ...orderBody, timeSlot: 'Midnight' },
+  });
+  assert.equal(invalidTimeSlot.response.status, 400);
+
+  const invalidMapUrl = await request('/orders', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { ...orderBody, mapUrl: 'https://example.com/fake-map' },
+  });
+  assert.equal(invalidMapUrl.response.status, 400);
+
   const create = await request('/orders', {
     method: 'POST',
     cookie: signup.cookie,
-    body: {
-      customerName: 'API Integration Test',
-      phone: testPhone,
-      address: 'Nairobi West, Nairobi',
-      fulfillment: 'Pickup + Delivery',
-      paymentMethod: 'M-Pesa',
-      notes: 'API test order',
-      items: [{ id: 'washing', kg: 1.5, quantity: 2 }],
-    },
+    body: orderBody,
   });
   assert.equal(create.response.status, 201);
   orderCode = create.body.order.id;
   assert.equal(create.body.order.subtotal, 297);
   assert.equal(create.body.order.serviceFee, 24);
   assert.equal(create.body.order.total, 321);
+  assert.equal(create.body.order.scheduledDate, scheduledDate);
+  assert.equal(create.body.order.timeSlot, orderBody.timeSlot);
+  assert.equal(create.body.order.mapUrl, orderBody.mapUrl);
 
   const customerOrders = await request('/orders', { cookie: signup.cookie });
   assert.ok(customerOrders.body.orders.some((order) => order.id === orderCode));
+  const persistedOrder = customerOrders.body.orders.find((order) => order.id === orderCode);
+  assert.equal(persistedOrder.scheduledDate, scheduledDate);
+  assert.equal(persistedOrder.timeSlot, orderBody.timeSlot);
+  assert.equal(persistedOrder.mapUrl, orderBody.mapUrl);
 
   const adminLogin = await request('/auth/login', {
     method: 'POST',
@@ -159,7 +205,7 @@ try {
   });
   assert.equal(deniedUpdate.response.status, 403);
 
-  console.log('API smoke test passed: profile updates, username sign-in, session auth, order calculation, customer scope, admin status update, and persistence.');
+  console.log('API smoke test passed: profile updates, username sign-in, pickup scheduling, map-link persistence, order calculation, customer scope, and admin updates.');
 } finally {
   const database = new Database(databasePath);
   const deleteTestData = database.transaction(() => {

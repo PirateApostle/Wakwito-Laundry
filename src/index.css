@@ -617,6 +617,10 @@ faq-list p {
   padding: 90px 0;
 }
 
+.section[id] {
+  scroll-margin-top: 90px;
+}
+
 .alt-section {
   background: rgba(255, 255, 255, 0.36);
 }
@@ -1150,6 +1154,55 @@ faq-list p {
 
 .checkout-card {
   padding: 22px 20px;
+}
+
+.location-map-card {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface-soft);
+}
+
+.location-map-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.location-map-heading .eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.location-map-heading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.optional-label {
+  color: var(--muted);
+  font-size: 0.85em;
+  font-weight: 400;
+}
+
+.tracking-map-link {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.tracking-map-link:hover {
+  text-decoration: underline;
+}
+
+.tracking-map-link span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .small-gap {
@@ -1779,6 +1832,11 @@ faq-list p {
 }
 
 @media (max-width: 760px) {
+  .location-map-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .menu-button {
     display: inline-flex;
     align-items: center;

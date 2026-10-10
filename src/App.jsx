@@ -110,7 +110,20 @@ function AppLayout() {
 
   useEffect(() => {
     setMenuOpen(false);
-  }, [location.pathname]);
+  }, [location.pathname, location.hash]);
+
+  useEffect(() => {
+    const sectionId = decodeURIComponent(location.hash.slice(1));
+    const frame = window.requestAnimationFrame(() => {
+      if (sectionId) {
+        document.getElementById(sectionId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } else if (location.pathname === '/') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [location.pathname, location.hash, location.key]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -149,9 +162,9 @@ function AppLayout() {
 
           <nav className={`nav ${menuOpen ? 'open' : ''}`} aria-label="Main navigation">
             {navItems.map((item) => (
-              <NavLink key={item.to} to={item.to} className="nav-link" end>
+              <Link key={item.to} to={item.to} className="nav-link">
                 {item.label}
-              </NavLink>
+              </Link>
             ))}
 
             {user ? (

@@ -49,6 +49,9 @@ database.exec(`
     status TEXT NOT NULL DEFAULT 'Pending',
     eta TEXT NOT NULL DEFAULT 'Awaiting confirmation',
     notes TEXT NOT NULL DEFAULT '',
+    map_url TEXT,
+    scheduled_date TEXT,
+    time_slot TEXT,
     items_json TEXT NOT NULL,
     subtotal INTEGER NOT NULL,
     service_fee INTEGER NOT NULL,
@@ -58,6 +61,11 @@ database.exec(`
 
   CREATE INDEX IF NOT EXISTS orders_customer_user_id_idx ON orders(customer_user_id);
 `);
+
+const orderColumns = new Set(database.pragma('table_info(orders)').map((column) => column.name));
+if (!orderColumns.has('map_url')) database.exec('ALTER TABLE orders ADD COLUMN map_url TEXT');
+if (!orderColumns.has('scheduled_date')) database.exec('ALTER TABLE orders ADD COLUMN scheduled_date TEXT');
+if (!orderColumns.has('time_slot')) database.exec('ALTER TABLE orders ADD COLUMN time_slot TEXT');
 
 const userColumns = new Set(database.pragma('table_info(users)').map((column) => column.name));
 if (!userColumns.has('username')) database.exec('ALTER TABLE users ADD COLUMN username TEXT');
@@ -98,7 +106,46 @@ const serviceCatalog = {
 
 const validFulfillment = new Set(['Customer Drop-off', 'Pickup', 'Delivery', 'Pickup + Delivery']);
 const validPaymentMethods = new Set(['M-Pesa', 'Cash']);
+const validTimeSlots = new Set(['Morning (8am–12pm)', 'Afternoon (12pm–4pm)', 'Evening (4pm–7pm)']);
 const validOrderStatuses = new Set(['Pending', 'In Progress', 'Picked Up', 'Completed']);
+
+function todayInNairobi() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function isValidFutureDate(date) {
+  if (typeof date !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
+  const parsedDate = new Date(`${date}T00:00:00.000Z`);
+  return Number.isFinite(parsedDate.getTime())
+    && parsedDate.toISOString().slice(0, 10) === date
+    && date > todayInNairobi();
+}
+
+function isGoogleMapsUrl(value) {
+  if (typeof value !== 'string' || value.length > 2048) return false;
+  try {
+    const url = new URL(value);
+    const allowedHost = ['google.com', 'www.google.com', 'maps.google.com', 'maps.app.goo.gl'].includes(url.hostname);
+    const validMapsPath = url.hostname === 'maps.app.goo.gl'
+      || url.pathname === '/'
+      || url.pathname.startsWith('/maps');
+    return url.protocol === 'https:'
+      && !url.username
+      && !url.password
+      && !url.port
+      && allowedHost
+      && validMapsPath;
+  } catch {
+    return false;
+  }
+}
 
 function publicUser(user) {
   return {
@@ -135,8 +182,11 @@ function normalizeOrder(row) {
     customerEmail: row.customer_email,
     phone: row.phone,
     address: row.address,
+    mapUrl: row.map_url,
     fulfillment: row.fulfillment,
     paymentMethod: row.payment_method,
+    scheduledDate: row.scheduled_date,
+    timeSlot: row.time_slot,
     status: row.status,
     eta: row.eta,
     notes: row.notes,
@@ -453,9 +503,16 @@ app.get('/api/orders', authenticate, (request, response) => {
 });
 
 app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response) => {
-  const { address, fulfillment, paymentMethod, notes = '', items } = request.body || {};
+  const { address, mapUrl = '', fulfillment, paymentMethod, scheduledDate, timeSlot, notes = '', items } = request.body || {};
   if (typeof address !== 'string' || address.trim().length < 4 || address.length > 240) {
     return sendError(response, 400, 'Enter a valid pickup or delivery address.');
+  }
+  if (!isValidFutureDate(scheduledDate)) {
+    return sendError(response, 400, 'Choose a valid service date from tomorrow onward.');
+  }
+  if (!validTimeSlots.has(timeSlot)) return sendError(response, 400, 'Choose a valid pickup time window.');
+  if (typeof mapUrl !== 'string' || (mapUrl.trim() !== '' && !isGoogleMapsUrl(mapUrl.trim()))) {
+    return sendError(response, 400, 'Enter a valid HTTPS Google Maps link.');
   }
   if (!validFulfillment.has(fulfillment)) return sendError(response, 400, 'Choose a valid fulfillment option.');
   if (!validPaymentMethods.has(paymentMethod)) return sendError(response, 400, 'Choose a valid payment method.');
@@ -492,13 +549,14 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response)
   }
   const customerName = String(request.body?.customerName || request.user.name).trim();
   const phone = String(request.body?.phone || request.user.phone).trim();
+  const normalizedMapUrl = mapUrl.trim() || null;
   if (!customerName || customerName.length > 100) return sendError(response, 400, 'Enter a valid customer name.');
   if (!/^[+]?[\d\s()-]{7,20}$/.test(phone)) return sendError(response, 400, 'Enter a valid phone number.');
   const insert = database.prepare(`
     INSERT INTO orders (
-      order_code, customer_user_id, customer_name, customer_email, phone, address,
-      fulfillment, payment_method, notes, items_json, subtotal, service_fee, total
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      order_code, customer_user_id, customer_name, customer_email, phone, address, map_url,
+      fulfillment, payment_method, scheduled_date, time_slot, notes, items_json, subtotal, service_fee, total
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = insert.run(
     orderCode,
@@ -507,8 +565,11 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response)
     request.user.email,
     phone,
     address.trim(),
+    normalizedMapUrl,
     fulfillment,
     paymentMethod,
+    scheduledDate,
+    timeSlot,
     notes.trim(),
     JSON.stringify(normalizedItems),
     subtotal,

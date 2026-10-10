@@ -26,6 +26,8 @@ React + Vite frontend backed by an Express API and SQLite database.
 
 The frontend is at `http://localhost:5173`. Vite proxies `/api` requests to the Express server at `http://127.0.0.1:3000`. The SQLite database is created at `.data/wakwito.sqlite`.
 
+Checkout lets customers search an address in Google Maps, optionally save a Google Maps share link, and choose a future service date and pickup time window. This no-key map-link flow does not require a Google Maps API key.
+
 
 With the development servers running, use `npm run test:api` to exercise session authentication, customer order access, server-side pricing, admin status updates, and persistence.
 
@@ -73,5 +75,5 @@ The GitHub Pages workflow builds and publishes the static frontend at https://pi
 - `GET /api/auth/me` — restore the current session
 - `PUT /api/auth/profile` — update the signed-in user’s name, unique username, phone, location, and profile photo
 - `GET /api/orders` — list the signed-in customer’s orders; admins and drivers can view all orders
-- `POST /api/orders` — create an order; item prices and totals are calculated by the server
+- `POST /api/orders` — create an order with a future service date, pickup time window, and optional Google Maps pin link; item prices and totals are calculated by the server
 - `PATCH /api/orders/:orderCode/status` — admin-only order status update

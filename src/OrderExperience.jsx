@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
-import { CheckCircle2, Clock3, PackageCheck, ShoppingCart, Truck } from 'lucide-react';
+import { CalendarDays, CheckCircle2, Clock3, ExternalLink, MapPin, PackageCheck, ShoppingCart, Truck } from 'lucide-react';
 import { clearCart, createOrder, getOrders, readCart } from './api';
 import { useAuth } from './auth';
 
@@ -16,6 +16,21 @@ const serviceCatalog = [
 function formatCurrency(value) {
   return `KSh ${Number(value).toLocaleString()}`;
 }
+
+function getDateOffset(offset) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const year = Number(parts.find((part) => part.type === 'year').value);
+  const month = Number(parts.find((part) => part.type === 'month').value);
+  const day = Number(parts.find((part) => part.type === 'day').value);
+  return new Date(Date.UTC(year, month - 1, day + offset)).toISOString().slice(0, 10);
+}
+
+const timeSlots = ['Morning (8am–12pm)', 'Afternoon (12pm–4pm)', 'Evening (4pm–7pm)'];
 
 export function OrderCreationPage() {
   const { user } = useAuth();
@@ -168,7 +183,10 @@ export function CheckoutPage() {
     customerName: user?.name || '',
     phone: user?.phone || '',
     address: user?.location || '',
+    mapUrl: '',
     fulfillment: 'Pickup + Delivery',
+    scheduledDate: getDateOffset(1),
+    timeSlot: timeSlots[0],
     paymentMethod: 'M-Pesa',
     notes: '',
   });
@@ -181,6 +199,10 @@ export function CheckoutPage() {
 
   const subtotal = cart.reduce((sum, item) => sum + Number(item.price || 0), 0);
   const total = subtotal + Math.round(subtotal * 0.08);
+  const mapsQuery = form.address.trim();
+  const mapSearchUrl = mapsQuery
+    ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapsQuery)}`
+    : 'https://www.google.com/maps';
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -196,7 +218,10 @@ export function CheckoutPage() {
         customerName: form.customerName,
         phone: form.phone,
         address: form.address,
+        mapUrl: form.mapUrl,
         fulfillment: form.fulfillment,
+        scheduledDate: form.scheduledDate,
+        timeSlot: form.timeSlot,
         paymentMethod: form.paymentMethod,
         notes: form.notes,
         items: cart.map((item) => ({
@@ -240,8 +265,53 @@ export function CheckoutPage() {
 
           <label>
             Pickup or delivery address
-            <input name="address" value={form.address} onChange={handleChange} required />
+            <input name="address" value={form.address} onChange={handleChange} maxLength={240} autoComplete="street-address" required />
           </label>
+
+          <div className="location-map-card">
+            <div className="location-map-heading">
+              <div>
+                <span className="eyebrow"><MapPin size={15} /> Pickup location</span>
+                <p>Search your address in Google Maps, then share the pin link below so the driver can find you.</p>
+              </div>
+              <a className="button secondary-button small-button" href={mapSearchUrl} target="_blank" rel="noopener noreferrer">
+                Find location on Google Maps <ExternalLink size={15} />
+              </a>
+            </div>
+            <label>
+              Google Maps pin link <span className="optional-label">(optional)</span>
+              <input
+                name="mapUrl"
+                type="url"
+                inputMode="url"
+                maxLength={2048}
+                value={form.mapUrl}
+                onChange={handleChange}
+                placeholder="Paste a https://maps.app.goo.gl/... share link"
+              />
+              <small>In Google Maps, tap Share and copy the link to your pinned location.</small>
+            </label>
+          </div>
+
+          <div className="two-col">
+            <label>
+              Service date
+              <input
+                name="scheduledDate"
+                type="date"
+                min={getDateOffset(1)}
+                value={form.scheduledDate}
+                onChange={handleChange}
+                required
+              />
+            </label>
+            <label>
+              Pickup time window
+              <select name="timeSlot" value={form.timeSlot} onChange={handleChange} required>
+                {timeSlots.map((slot) => <option key={slot}>{slot}</option>)}
+              </select>
+            </label>
+          </div>
 
           <div className="two-col">
             <label>
@@ -360,6 +430,12 @@ export function OrderTrackingPage() {
                 </div>
 
                 <div className="tracking-body">
+                  {order.scheduledDate ? (
+                    <div className="tracking-detail">
+                      <CalendarDays size={16} />
+                      <span>{new Date(`${order.scheduledDate}T00:00:00`).toLocaleDateString()} · {order.timeSlot}</span>
+                    </div>
+                  ) : null}
                   <div className="tracking-detail">
                     <Clock3 size={16} />
                     <span>{order.eta}</span>
@@ -368,6 +444,12 @@ export function OrderTrackingPage() {
                     <Truck size={16} />
                     <span>{order.address}</span>
                   </div>
+                  {order.mapUrl ? (
+                    <a className="tracking-detail tracking-map-link" href={order.mapUrl} target="_blank" rel="noopener noreferrer">
+                      <MapPin size={16} />
+                      <span>Open pickup pin in Google Maps <ExternalLink size={14} /></span>
+                    </a>
+                  ) : null}
                   <div className="tracking-detail">
                     <CheckCircle2 size={16} />
                     <span>{order.paymentMethod}</span>
