@@ -28,8 +28,14 @@ The frontend is at `http://localhost:5173`. Vite proxies `/api` requests to the 
 
 Checkout lets customers search an address in Google Maps, optionally save a Google Maps share link, and choose a future service date and pickup time window. This no-key map-link flow does not require a Google Maps API key.
 
+Order tracking refreshes automatically and shows a notice when an administrator approves an order by moving it to “In Progress.” Customers can choose M-Pesa STK Push payment on order or cash payment on delivery, and must accept the Terms and Conditions and acknowledge the Privacy Policy before ordering.
 
-With the development servers running, use `npm run test:api` to exercise session authentication, customer order access, server-side pricing, admin status updates, and persistence.
+Approval messages are sent by Africa’s Talking SMS and SMTP email when those providers are configured. Set `AT_USERNAME` and `AT_API_KEY` to enable SMS; `AT_ENV` selects `sandbox` or `production`, with optional `AT_SENDER_ID`. Set `SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` to enable email; `SMTP_PORT` and `SMTP_SECURE` control the TLS connection. Provider results are recorded per order and channel. Without provider credentials, the in-app order approval notice still works and the tracking page reports external channels as not configured.
+
+M-Pesa STK Push requires a Safaricom Daraja app and a registered Paybill or Till shortcode. Set all `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORTCODE`, `MPESA_PASSKEY`, and `MPESA_CALLBACK_URL` values in the production service environment to enable it. Set `MPESA_ENV=production` for the live Daraja endpoint or `sandbox` for testing. Set `MPESA_TRANSACTION_TYPE=CustomerPayBillOnline` for a Paybill or `CustomerBuyGoodsOnline` for a Till. Configure the public HTTPS callback URL ending in `/api/payments/mpesa/callback`. Until those values are configured, M-Pesa checkout is disabled; customers may use cash on delivery.
+
+
+With the development servers running, use `npm run test:api` to exercise session authentication, customer order access, server-side pricing, payment option validation, admin approval updates, and persistence.
 
 
 Development starts with these demo accounts:
@@ -75,5 +81,11 @@ The GitHub Pages workflow builds and publishes the static frontend at https://pi
 - `GET /api/auth/me` — restore the current session
 - `PUT /api/auth/profile` — update the signed-in user’s name, unique username, phone, location, and profile photo
 - `GET /api/orders` — list the signed-in customer’s orders; admins and drivers can view all orders
-- `POST /api/orders` — create an order with a future service date, pickup time window, and optional Google Maps pin link; item prices and totals are calculated by the server
+- `GET /api/payments/options` — check whether M-Pesa STK Push is configured
+- `POST /api/orders` — create an order with scheduling, map pin, payment timing, and accepted policy version; item prices and totals are calculated by the server
+- `POST /api/orders/:orderCode/payment` — customer-only retry for a failed M-Pesa STK Push
+- `POST /api/orders/:orderCode/approval-notifications/retry` — admin-only retry for approval SMS/email
+- `POST /api/payments/mpesa/callback` — receive Daraja payment result callbacks
 - `PATCH /api/orders/:orderCode/status` — admin-only order status update
+
+Terms and Conditions and the Privacy Policy are available from the site footer and checkout. Checkout records the accepted policy version and timestamp with each order.

@@ -16,6 +16,78 @@ const isProduction = process.env.NODE_ENV === 'production';
 const cookieName = 'wakwito_session';
 const jwtSecret = process.env.JWT_SECRET || (!isProduction ? crypto.randomBytes(48).toString('hex') : null);
 const databasePath = process.env.DATABASE_PATH || path.join(__dirname, '.data', 'wakwito.sqlite');
+const smsProviderKeys = ['AT_USERNAME', 'AT_API_KEY'];
+const emailProviderKeys = ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASSWORD', 'SMTP_FROM'];
+const isProviderConfigured = (keys) => keys.every((key) => Boolean(process.env[key]));
+const isProviderPartiallyConfigured = (keys) => keys.some((key) => Boolean(process.env[key])) && !isProviderConfigured(keys);
+if (isProviderPartiallyConfigured(smsProviderKeys)) {
+  throw new Error(`Configure all Africa's Talking settings together: ${smsProviderKeys.filter((key) => !process.env[key]).join(', ')}.`);
+}
+if (isProviderPartiallyConfigured(emailProviderKeys)) {
+  throw new Error(`Configure all SMTP settings together: ${emailProviderKeys.filter((key) => !process.env[key]).join(', ')}.`);
+}
+const smsConfig = isProviderConfigured(smsProviderKeys)
+  ? {
+      username: process.env.AT_USERNAME,
+      apiKey: process.env.AT_API_KEY,
+      senderId: process.env.AT_SENDER_ID,
+      baseUrl: process.env.AT_ENV === 'production'
+        ? 'https://api.africastalking.com'
+        : 'https://api.sandbox.africastalking.com',
+    }
+  : null;
+const emailConfig = isProviderConfigured(emailProviderKeys)
+  ? {
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === 'true',
+      user: process.env.SMTP_USER,
+      password: process.env.SMTP_PASSWORD,
+      from: process.env.SMTP_FROM,
+    }
+  : null;
+if (emailConfig && (!Number.isInteger(emailConfig.port) || emailConfig.port < 1 || emailConfig.port > 65535)) {
+  throw new Error('SMTP_PORT must be a valid TCP port number.');
+}
+const mpesaEnvironment = process.env.MPESA_ENV || 'sandbox';
+const mpesaConfigKeys = [
+  'MPESA_CONSUMER_KEY',
+  'MPESA_CONSUMER_SECRET',
+  'MPESA_SHORTCODE',
+  'MPESA_PASSKEY',
+  'MPESA_CALLBACK_URL',
+];
+const configuredMpesaKeys = mpesaConfigKeys.filter((key) => process.env[key]);
+if (configuredMpesaKeys.length > 0 && configuredMpesaKeys.length !== mpesaConfigKeys.length) {
+  throw new Error(`Configure all M-Pesa settings together: ${mpesaConfigKeys.filter((key) => !process.env[key]).join(', ')}.`);
+}
+if (!['sandbox', 'production'].includes(mpesaEnvironment)) {
+  throw new Error('MPESA_ENV must be either "sandbox" or "production".');
+}
+const mpesaTransactionType = process.env.MPESA_TRANSACTION_TYPE || 'CustomerPayBillOnline';
+if (!['CustomerPayBillOnline', 'CustomerBuyGoodsOnline'].includes(mpesaTransactionType)) {
+  throw new Error('MPESA_TRANSACTION_TYPE must be CustomerPayBillOnline or CustomerBuyGoodsOnline.');
+}
+const mpesaConfig = configuredMpesaKeys.length === mpesaConfigKeys.length
+  ? {
+      consumerKey: process.env.MPESA_CONSUMER_KEY,
+      consumerSecret: process.env.MPESA_CONSUMER_SECRET,
+      shortcode: process.env.MPESA_SHORTCODE,
+      passkey: process.env.MPESA_PASSKEY,
+      callbackUrl: process.env.MPESA_CALLBACK_URL,
+      transactionType: mpesaTransactionType,
+      baseUrl: mpesaEnvironment === 'production'
+        ? 'https://api.safaricom.co.ke'
+        : 'https://sandbox.safaricom.co.ke',
+    }
+  : null;
+
+if (mpesaConfig) {
+  const callbackUrl = new URL(mpesaConfig.callbackUrl);
+  if (callbackUrl.protocol !== 'https:' || !callbackUrl.pathname.endsWith('/api/payments/mpesa/callback')) {
+    throw new Error('MPESA_CALLBACK_URL must be an HTTPS URL ending in /api/payments/mpesa/callback.');
+  }
+}
 
 if (!jwtSecret) {
   throw new Error('Set JWT_SECRET before starting the server in production.');
@@ -52,6 +124,14 @@ database.exec(`
     map_url TEXT,
     scheduled_date TEXT,
     time_slot TEXT,
+    payment_timing TEXT NOT NULL DEFAULT 'DELIVERY',
+    payment_status TEXT NOT NULL DEFAULT 'UNPAID',
+    mpesa_checkout_request_id TEXT,
+    mpesa_merchant_request_id TEXT,
+    mpesa_receipt TEXT,
+    mpesa_phone TEXT,
+    terms_accepted_at TEXT,
+    terms_version TEXT,
     items_json TEXT NOT NULL,
     subtotal INTEGER NOT NULL,
     service_fee INTEGER NOT NULL,
@@ -66,6 +146,29 @@ const orderColumns = new Set(database.pragma('table_info(orders)').map((column) 
 if (!orderColumns.has('map_url')) database.exec('ALTER TABLE orders ADD COLUMN map_url TEXT');
 if (!orderColumns.has('scheduled_date')) database.exec('ALTER TABLE orders ADD COLUMN scheduled_date TEXT');
 if (!orderColumns.has('time_slot')) database.exec('ALTER TABLE orders ADD COLUMN time_slot TEXT');
+if (!orderColumns.has('payment_timing')) database.exec("ALTER TABLE orders ADD COLUMN payment_timing TEXT NOT NULL DEFAULT 'DELIVERY'");
+if (!orderColumns.has('payment_status')) database.exec("ALTER TABLE orders ADD COLUMN payment_status TEXT NOT NULL DEFAULT 'UNPAID'");
+if (!orderColumns.has('mpesa_checkout_request_id')) database.exec('ALTER TABLE orders ADD COLUMN mpesa_checkout_request_id TEXT');
+if (!orderColumns.has('mpesa_merchant_request_id')) database.exec('ALTER TABLE orders ADD COLUMN mpesa_merchant_request_id TEXT');
+if (!orderColumns.has('mpesa_receipt')) database.exec('ALTER TABLE orders ADD COLUMN mpesa_receipt TEXT');
+if (!orderColumns.has('mpesa_phone')) database.exec('ALTER TABLE orders ADD COLUMN mpesa_phone TEXT');
+if (!orderColumns.has('terms_accepted_at')) database.exec('ALTER TABLE orders ADD COLUMN terms_accepted_at TEXT');
+if (!orderColumns.has('terms_version')) database.exec('ALTER TABLE orders ADD COLUMN terms_version TEXT');
+database.exec('CREATE UNIQUE INDEX IF NOT EXISTS orders_mpesa_checkout_request_unique_idx ON orders(mpesa_checkout_request_id) WHERE mpesa_checkout_request_id IS NOT NULL');
+database.prepare(`
+  UPDATE orders SET payment_timing = 'ORDER'
+  WHERE payment_method = 'M-Pesa' AND payment_timing = 'DELIVERY' AND payment_status = 'UNPAID'
+`).run();
+database.exec(`
+  CREATE TABLE IF NOT EXISTS approval_notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL CHECK (channel IN ('SMS', 'EMAIL')),
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'SENT', 'FAILED', 'NOT_CONFIGURED')),
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (order_id, channel)
+  )
+`);
 
 const userColumns = new Set(database.pragma('table_info(users)').map((column) => column.name));
 if (!userColumns.has('username')) database.exec('ALTER TABLE users ADD COLUMN username TEXT');
@@ -106,6 +209,9 @@ const serviceCatalog = {
 
 const validFulfillment = new Set(['Customer Drop-off', 'Pickup', 'Delivery', 'Pickup + Delivery']);
 const validPaymentMethods = new Set(['M-Pesa', 'Cash']);
+const validPaymentTimings = new Set(['ORDER', 'DELIVERY']);
+const policyVersion = '2026-10-10';
+const termsUrl = process.env.PUBLIC_SITE_URL || 'https://wakwito-laundry.onrender.com';
 const validTimeSlots = new Set(['Morning (8am–12pm)', 'Afternoon (12pm–4pm)', 'Evening (4pm–7pm)']);
 const validOrderStatuses = new Set(['Pending', 'In Progress', 'Picked Up', 'Completed']);
 
@@ -176,6 +282,9 @@ function sendError(response, status, message) {
 }
 
 function normalizeOrder(row) {
+  const approvalNotifications = database.prepare(`
+    SELECT channel, status FROM approval_notifications WHERE order_id = ?
+  `).all(row.id);
   return {
     id: row.order_code,
     customerName: row.customer_name,
@@ -185,6 +294,10 @@ function normalizeOrder(row) {
     mapUrl: row.map_url,
     fulfillment: row.fulfillment,
     paymentMethod: row.payment_method,
+    paymentTiming: row.payment_timing,
+    paymentStatus: row.payment_status,
+    mpesaReceipt: row.mpesa_receipt,
+    approvalNotifications,
     scheduledDate: row.scheduled_date,
     timeSlot: row.time_slot,
     status: row.status,
@@ -195,6 +308,177 @@ function normalizeOrder(row) {
     serviceFee: row.service_fee,
     total: row.total,
     createdAt: row.created_at,
+  };
+}
+
+function escapeHtml(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+async function sendApprovalSms(order) {
+  if (!smsConfig) throw new Error('Africa’s Talking SMS is not configured.');
+  const phone = normalizeKenyanPhone(order.phone);
+  if (!phone) throw new Error('Customer phone number is not a valid Kenyan mobile number.');
+  const message = `Wakwito: Order ${order.order_code} is approved. Our team is now working on your laundry. Track it at ${termsUrl}/#/order-tracking.`;
+  const form = new URLSearchParams({
+    username: smsConfig.username,
+    to: `+${phone}`,
+    message,
+  });
+  if (smsConfig.senderId) form.set('from', smsConfig.senderId);
+  const response = await fetch(`${smsConfig.baseUrl}/version1/messaging`, {
+    method: 'POST',
+    headers: {
+      apiKey: smsConfig.apiKey,
+      Accept: 'application/json',
+      'Content-Type': 'application/x-www-form-urlencoded',
+    },
+    body: form,
+    signal: AbortSignal.timeout(15000),
+  });
+  const payload = await response.json();
+  const recipient = payload.SMSMessageData?.Recipients?.[0];
+  if (!response.ok || recipient?.statusCode !== 101) {
+    throw new Error('Africa’s Talking did not confirm SMS delivery.');
+  }
+}
+
+async function sendApprovalEmail(order) {
+  if (!emailConfig) throw new Error('SMTP email is not configured.');
+  const { default: nodemailer } = await import('nodemailer');
+  const transporter = nodemailer.createTransport({
+    host: emailConfig.host,
+    port: emailConfig.port,
+    secure: emailConfig.secure,
+    auth: { user: emailConfig.user, pass: emailConfig.password },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
+  });
+  const safeName = escapeHtml(order.customer_name);
+  const safeCode = escapeHtml(order.order_code);
+  try {
+    await transporter.sendMail({
+      from: emailConfig.from,
+      to: order.customer_email,
+      subject: `Your Wakwito order ${order.order_code} is approved`,
+      text: `Hello ${order.customer_name}, your order ${order.order_code} has been approved. Our team is now working on your laundry. Track your order at ${termsUrl}/#/order-tracking.`,
+      html: `<p>Hello ${safeName},</p><p>Your order <strong>${safeCode}</strong> has been approved. Our team is now working on your laundry.</p><p><a href="${termsUrl}/#/order-tracking">Track your order</a></p>`,
+    });
+  } finally {
+    transporter.close();
+  }
+}
+
+async function notifyOrderApproved(order) {
+  const channels = [
+    { name: 'SMS', configured: Boolean(smsConfig), send: sendApprovalSms },
+    { name: 'EMAIL', configured: Boolean(emailConfig), send: sendApprovalEmail },
+  ];
+
+  await Promise.all(channels.map(async ({ name, configured, send }) => {
+    const existing = database.prepare(`
+      SELECT id, status FROM approval_notifications WHERE order_id = ? AND channel = ?
+    `).get(order.id, name);
+    if (existing?.status === 'SENT' || existing?.status === 'PENDING') return;
+    if (existing) {
+      database.prepare(`
+        UPDATE approval_notifications SET status = 'PENDING', updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `).run(existing.id);
+    } else {
+      database.prepare(`
+        INSERT INTO approval_notifications (order_id, channel, status) VALUES (?, ?, 'PENDING')
+      `).run(order.id, name);
+    }
+
+    try {
+      if (!configured) throw new Error(`${name} provider is not configured.`);
+      await send(order);
+      database.prepare(`
+        UPDATE approval_notifications SET status = 'SENT', updated_at = CURRENT_TIMESTAMP
+        WHERE order_id = ? AND channel = ?
+      `).run(order.id, name);
+    } catch (error) {
+      const status = configured ? 'FAILED' : 'NOT_CONFIGURED';
+      database.prepare(`
+        UPDATE approval_notifications SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE order_id = ? AND channel = ?
+      `).run(status, order.id, name);
+      console.error(`Order approval ${name} notification ${status.toLowerCase()} for ${order.order_code}: ${error.message}`);
+    }
+  }));
+}
+
+function normalizeKenyanPhone(phone) {
+  const digits = phone.replace(/\D/g, '');
+  if (/^0[17]\d{8}$/.test(digits)) return `254${digits.slice(1)}`;
+  if (/^254[17]\d{8}$/.test(digits)) return digits;
+  return null;
+}
+
+function getMpesaTimestamp() {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Africa/Nairobi',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}${values.month}${values.day}${values.hour}${values.minute}${values.second}`;
+}
+
+async function initiateMpesaPayment(order, phone) {
+  if (!mpesaConfig) throw new Error('M-Pesa payments are not configured yet. Choose cash on delivery or contact support.');
+  const timestamp = getMpesaTimestamp();
+  const password = Buffer.from(`${mpesaConfig.shortcode}${mpesaConfig.passkey}${timestamp}`).toString('base64');
+  const credentials = Buffer.from(`${mpesaConfig.consumerKey}:${mpesaConfig.consumerSecret}`).toString('base64');
+  const tokenResponse = await fetch(
+    `${mpesaConfig.baseUrl}/oauth/v1/generate?grant_type=client_credentials`,
+    {
+      headers: { Authorization: `Basic ${credentials}` },
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+  const tokenPayload = await tokenResponse.json();
+  if (!tokenResponse.ok || typeof tokenPayload.access_token !== 'string') {
+    throw new Error('Safaricom could not authorize the M-Pesa payment request. Try again or choose cash on delivery.');
+  }
+
+  const pushResponse = await fetch(`${mpesaConfig.baseUrl}/mpesa/stkpush/v1/processrequest`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${tokenPayload.access_token}`,
+      'Content-Type': 'application/json',
+    },
+    signal: AbortSignal.timeout(20000),
+    body: JSON.stringify({
+      BusinessShortCode: mpesaConfig.shortcode,
+      Password: password,
+      Timestamp: timestamp,
+      TransactionType: mpesaConfig.transactionType,
+      Amount: order.total,
+      PartyA: phone,
+      PartyB: mpesaConfig.shortcode,
+      PhoneNumber: phone,
+      CallBackURL: mpesaConfig.callbackUrl,
+      AccountReference: order.id,
+      TransactionDesc: `Wakwito laundry order ${order.id}`,
+    }),
+  });
+  const pushPayload = await pushResponse.json();
+  if (!pushResponse.ok || pushPayload.ResponseCode !== '0'
+      || typeof pushPayload.CheckoutRequestID !== 'string'
+      || typeof pushPayload.MerchantRequestID !== 'string') {
+    throw new Error(pushPayload.errorMessage || pushPayload.ResponseDescription || 'Safaricom could not start the M-Pesa prompt. Try again or choose cash on delivery.');
+  }
+  return {
+    checkoutRequestId: pushPayload.CheckoutRequestID,
+    merchantRequestId: pushPayload.MerchantRequestID,
   };
 }
 
@@ -337,9 +621,9 @@ function seedDemoData() {
   const insertOrder = database.prepare(`
     INSERT INTO orders (
       order_code, customer_user_id, customer_name, customer_email, phone, address,
-      fulfillment, payment_method, status, eta, items_json, subtotal, service_fee,
-      total, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      fulfillment, payment_method, payment_timing, payment_status, status, eta,
+      items_json, subtotal, service_fee, total, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   for (const order of samples) {
@@ -353,6 +637,8 @@ function seedDemoData() {
       order.address,
       order.fulfillment,
       order.payment,
+      order.payment === 'M-Pesa' ? 'ORDER' : 'DELIVERY',
+      order.payment === 'M-Pesa' ? 'PAID' : 'UNPAID',
       order.status,
       order.eta,
       JSON.stringify(order.items),
@@ -372,6 +658,49 @@ app.use(cookieParser());
 
 app.get('/api/health', (_request, response) => {
   response.json({ status: 'ok', service: 'wakwito-api' });
+});
+
+app.get('/api/payments/options', (_request, response) => {
+  response.json({
+    mpesaAvailable: Boolean(mpesaConfig),
+    approvalNotifications: { sms: Boolean(smsConfig), email: Boolean(emailConfig) },
+  });
+});
+
+app.post('/api/payments/mpesa/callback', (request, response) => {
+  const callback = request.body?.Body?.stkCallback;
+  const checkoutRequestId = callback?.CheckoutRequestID;
+  if (typeof checkoutRequestId !== 'string') {
+    return sendError(response, 400, 'Invalid M-Pesa callback.');
+  }
+
+  const order = database.prepare(`
+    SELECT id, total, mpesa_phone, payment_status, payment_method, payment_timing FROM orders
+    WHERE mpesa_checkout_request_id = ?
+  `).get(checkoutRequestId);
+  if (!order || order.payment_method !== 'M-Pesa' || order.payment_timing !== 'ORDER') {
+    return sendError(response, 404, 'M-Pesa payment request not found.');
+  }
+  if (order.payment_status === 'PAID') return response.json({ status: 'accepted' });
+
+  if (callback.ResultCode !== 0) {
+    database.prepare("UPDATE orders SET payment_status = 'FAILED' WHERE id = ? AND payment_status = 'PENDING'")
+      .run(order.id);
+    return response.json({ status: 'accepted' });
+  }
+
+  const items = callback.CallbackMetadata?.Item;
+  const amount = items?.find((item) => item.Name === 'Amount')?.Value;
+  const receipt = items?.find((item) => item.Name === 'MpesaReceiptNumber')?.Value;
+  const phone = items?.find((item) => item.Name === 'PhoneNumber')?.Value;
+  if (Number(amount) !== order.total || String(phone) !== order.mpesa_phone || typeof receipt !== 'string') {
+    return sendError(response, 400, 'M-Pesa payment details did not match the order.');
+  }
+  database.prepare(`
+    UPDATE orders SET payment_status = 'PAID', mpesa_receipt = ?
+    WHERE id = ? AND payment_status = 'PENDING'
+  `).run(receipt, order.id);
+  return response.json({ status: 'accepted' });
 });
 
 app.post('/api/auth/login', (request, response) => {
@@ -502,8 +831,19 @@ app.get('/api/orders', authenticate, (request, response) => {
   response.json({ orders: orders.map(normalizeOrder) });
 });
 
-app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response) => {
-  const { address, mapUrl = '', fulfillment, paymentMethod, scheduledDate, timeSlot, notes = '', items } = request.body || {};
+app.post('/api/orders', authenticate, authorize('CUSTOMER'), async (request, response) => {
+  const {
+    address,
+    mapUrl = '',
+    fulfillment,
+    paymentMethod,
+    paymentTiming,
+    scheduledDate,
+    timeSlot,
+    notes = '',
+    acceptedTerms,
+    items,
+  } = request.body || {};
   if (typeof address !== 'string' || address.trim().length < 4 || address.length > 240) {
     return sendError(response, 400, 'Enter a valid pickup or delivery address.');
   }
@@ -516,6 +856,15 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response)
   }
   if (!validFulfillment.has(fulfillment)) return sendError(response, 400, 'Choose a valid fulfillment option.');
   if (!validPaymentMethods.has(paymentMethod)) return sendError(response, 400, 'Choose a valid payment method.');
+  if (!validPaymentTimings.has(paymentTiming)
+      || (paymentMethod === 'M-Pesa' && paymentTiming !== 'ORDER')
+      || (paymentMethod === 'Cash' && paymentTiming !== 'DELIVERY')) {
+    return sendError(response, 400, 'Choose M-Pesa payment on order or cash payment on delivery.');
+  }
+  if (acceptedTerms !== true) return sendError(response, 400, 'Accept the Terms and Conditions and Privacy Policy to place an order.');
+  if (paymentMethod === 'M-Pesa' && !mpesaConfig) {
+    return sendError(response, 503, 'M-Pesa payments are not configured yet. Choose cash on delivery or contact support.');
+  }
   if (typeof notes !== 'string' || notes.length > 1000) return sendError(response, 400, 'Special instructions must be under 1,000 characters.');
   if (!Array.isArray(items) || items.length < 1 || items.length > 30) {
     return sendError(response, 400, 'An order must contain between 1 and 30 service items.');
@@ -552,11 +901,16 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response)
   const normalizedMapUrl = mapUrl.trim() || null;
   if (!customerName || customerName.length > 100) return sendError(response, 400, 'Enter a valid customer name.');
   if (!/^[+]?[\d\s()-]{7,20}$/.test(phone)) return sendError(response, 400, 'Enter a valid phone number.');
+  const mpesaPhone = paymentMethod === 'M-Pesa' ? normalizeKenyanPhone(phone) : null;
+  if (paymentMethod === 'M-Pesa' && !mpesaPhone) {
+    return sendError(response, 400, 'Enter a valid Kenyan mobile number for the M-Pesa prompt.');
+  }
   const insert = database.prepare(`
     INSERT INTO orders (
       order_code, customer_user_id, customer_name, customer_email, phone, address, map_url,
-      fulfillment, payment_method, scheduled_date, time_slot, notes, items_json, subtotal, service_fee, total
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      fulfillment, payment_method, payment_timing, payment_status, mpesa_phone, scheduled_date,
+      time_slot, terms_accepted_at, terms_version, notes, items_json, subtotal, service_fee, total
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const result = insert.run(
     orderCode,
@@ -568,19 +922,89 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), (request, response)
     normalizedMapUrl,
     fulfillment,
     paymentMethod,
+    paymentTiming,
+    paymentMethod === 'M-Pesa' ? 'PENDING' : 'UNPAID',
+    mpesaPhone,
     scheduledDate,
     timeSlot,
+    new Date().toISOString(),
+    policyVersion,
     notes.trim(),
     JSON.stringify(normalizedItems),
     subtotal,
     serviceFee,
     total,
   );
-  const order = database.prepare('SELECT * FROM orders WHERE id = ?').get(Number(result.lastInsertRowid));
+  const orderId = Number(result.lastInsertRowid);
+  if (paymentMethod === 'M-Pesa') {
+    const order = database.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+    try {
+      const payment = await initiateMpesaPayment(normalizeOrder(order), mpesaPhone);
+      database.prepare(`
+        UPDATE orders SET mpesa_checkout_request_id = ?, mpesa_merchant_request_id = ?
+        WHERE id = ?
+      `).run(payment.checkoutRequestId, payment.merchantRequestId, orderId);
+    } catch (error) {
+      database.prepare("UPDATE orders SET payment_status = 'FAILED' WHERE id = ?").run(orderId);
+      const failedOrder = database.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+      return response.status(201).json({
+        order: normalizeOrder(failedOrder),
+        paymentError: error.name === 'TimeoutError'
+          ? 'Safaricom did not respond in time. Retry the M-Pesa prompt from order tracking.'
+          : error.message,
+      });
+    }
+  }
+
+  const order = database.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
   return response.status(201).json({ order: normalizeOrder(order) });
 });
 
-app.patch('/api/orders/:orderCode/status', authenticate, authorize('ADMIN'), (request, response) => {
+app.post('/api/orders/:orderCode/payment', authenticate, authorize('CUSTOMER'), async (request, response) => {
+  if (!mpesaConfig) return sendError(response, 503, 'M-Pesa payments are not configured yet.');
+  const order = database.prepare(`
+    SELECT * FROM orders WHERE order_code = ? AND customer_user_id = ?
+  `).get(request.params.orderCode, request.user.id);
+  if (!order) return sendError(response, 404, 'Order not found.');
+  if (order.payment_method !== 'M-Pesa' || order.payment_timing !== 'ORDER') {
+    return sendError(response, 400, 'This order is not set up for M-Pesa payment on order.');
+  }
+  if (order.payment_status === 'PAID') return sendError(response, 409, 'This order has already been paid.');
+  if (order.payment_status === 'PENDING') return sendError(response, 409, 'An M-Pesa prompt is already pending. Check your phone or wait for it to expire.');
+
+  const mpesaPhone = normalizeKenyanPhone(order.phone);
+  if (!mpesaPhone) return sendError(response, 400, 'Update your account with a valid Kenyan mobile number before retrying payment.');
+  database.prepare("UPDATE orders SET payment_status = 'PENDING', mpesa_phone = ? WHERE id = ?")
+    .run(mpesaPhone, order.id);
+  try {
+    const payment = await initiateMpesaPayment(normalizeOrder(order), mpesaPhone);
+    database.prepare(`
+      UPDATE orders SET mpesa_checkout_request_id = ?, mpesa_merchant_request_id = ?
+      WHERE id = ?
+    `).run(payment.checkoutRequestId, payment.merchantRequestId, order.id);
+    const updatedOrder = database.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+    return response.json({ order: normalizeOrder(updatedOrder) });
+  } catch (error) {
+    database.prepare("UPDATE orders SET payment_status = 'FAILED' WHERE id = ?").run(order.id);
+    return sendError(response, 502, error.name === 'TimeoutError'
+      ? 'Safaricom did not respond in time. Retry the M-Pesa prompt.'
+      : error.message);
+  }
+});
+
+app.post('/api/orders/:orderCode/approval-notifications/retry', authenticate, authorize('ADMIN'), async (request, response) => {
+  const order = database.prepare('SELECT * FROM orders WHERE order_code = ?')
+    .get(request.params.orderCode);
+  if (!order) return sendError(response, 404, 'Order not found.');
+  if (order.status !== 'In Progress') {
+    return sendError(response, 409, 'Approval notifications are available only for approved orders.');
+  }
+  await notifyOrderApproved(order);
+  const updatedOrder = database.prepare('SELECT * FROM orders WHERE id = ?').get(order.id);
+  return response.json({ order: normalizeOrder(updatedOrder) });
+});
+
+app.patch('/api/orders/:orderCode/status', authenticate, authorize('ADMIN'), async (request, response) => {
   const status = request.body?.status;
   if (!validOrderStatuses.has(status)) return sendError(response, 400, 'Choose a valid order status.');
 
@@ -591,10 +1015,20 @@ app.patch('/api/orders/:orderCode/status', authenticate, authorize('ADMIN'), (re
       : status === 'In Progress'
         ? 'Pickup in 2h'
         : 'Awaiting confirmation';
+  const previousOrder = database.prepare('SELECT * FROM orders WHERE order_code = ?')
+    .get(request.params.orderCode);
+  if (!previousOrder) return sendError(response, 404, 'Order not found.');
+  if (status === 'In Progress' && previousOrder.payment_method === 'M-Pesa'
+      && previousOrder.payment_status !== 'PAID') {
+    return sendError(response, 409, 'Confirm the M-Pesa payment before approving this order.');
+  }
   const result = database.prepare('UPDATE orders SET status = ?, eta = ? WHERE order_code = ?')
     .run(status, eta, request.params.orderCode);
   if (result.changes === 0) return sendError(response, 404, 'Order not found.');
 
+  if (status === 'In Progress' && previousOrder.status !== 'In Progress') {
+    await notifyOrderApproved(previousOrder);
+  }
   const order = database.prepare('SELECT * FROM orders WHERE order_code = ?').get(request.params.orderCode);
   return response.json({ order: normalizeOrder(order) });
 });

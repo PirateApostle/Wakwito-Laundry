@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { CalendarDays, CheckCircle2, Clock3, ExternalLink, MapPin, PackageCheck, ShoppingCart, Truck } from 'lucide-react';
-import { clearCart, createOrder, getOrders, readCart } from './api';
+import { clearCart, createOrder, getOrders, getPaymentOptions, readCart, requestMpesaPayment } from './api';
 import { useAuth } from './auth';
 
 const serviceCatalog = [
@@ -179,6 +179,7 @@ export function CheckoutPage() {
   const [cart] = useState(() => readCart());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [mpesaAvailable, setMpesaAvailable] = useState(false);
   const [form, setForm] = useState({
     customerName: user?.name || '',
     phone: user?.phone || '',
@@ -187,9 +188,24 @@ export function CheckoutPage() {
     fulfillment: 'Pickup + Delivery',
     scheduledDate: getDateOffset(1),
     timeSlot: timeSlots[0],
-    paymentMethod: 'M-Pesa',
+    paymentChoice: 'CASH_ON_DELIVERY',
+    acceptedTerms: false,
     notes: '',
   });
+
+  useEffect(() => {
+    let active = true;
+    getPaymentOptions()
+      .then(({ mpesaAvailable: isAvailable }) => {
+        if (active) setMpesaAvailable(isAvailable);
+      })
+      .catch((optionsError) => {
+        if (active) setError(optionsError.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!cart.length) {
@@ -206,7 +222,10 @@ export function CheckoutPage() {
 
   const handleChange = (event) => {
     const { name, value } = event.target;
-    setForm((current) => ({ ...current, [name]: value }));
+    setForm((current) => ({
+      ...current,
+      [name]: event.target.type === 'checkbox' ? event.target.checked : value,
+    }));
   };
 
   const handleSubmit = async (event) => {
@@ -214,7 +233,7 @@ export function CheckoutPage() {
     setSubmitting(true);
     setError('');
     try {
-      const order = await createOrder({
+      const { order } = await createOrder({
         customerName: form.customerName,
         phone: form.phone,
         address: form.address,
@@ -222,7 +241,9 @@ export function CheckoutPage() {
         fulfillment: form.fulfillment,
         scheduledDate: form.scheduledDate,
         timeSlot: form.timeSlot,
-        paymentMethod: form.paymentMethod,
+        paymentMethod: form.paymentChoice === 'MPESA_ON_ORDER' ? 'M-Pesa' : 'Cash',
+        paymentTiming: form.paymentChoice === 'MPESA_ON_ORDER' ? 'ORDER' : 'DELIVERY',
+        acceptedTerms: form.acceptedTerms,
         notes: form.notes,
         items: cart.map((item) => ({
           id: item.serviceId,
@@ -313,28 +334,65 @@ export function CheckoutPage() {
             </label>
           </div>
 
-          <div className="two-col">
-            <label>
-              Fulfillment type
-              <select name="fulfillment" value={form.fulfillment} onChange={handleChange}>
-                <option>Customer Drop-off</option>
-                <option>Pickup</option>
-                <option>Delivery</option>
-                <option>Pickup + Delivery</option>
-              </select>
+          <label>
+            Fulfillment type
+            <select name="fulfillment" value={form.fulfillment} onChange={handleChange}>
+              <option>Customer Drop-off</option>
+              <option>Pickup</option>
+              <option>Delivery</option>
+              <option>Pickup + Delivery</option>
+            </select>
+          </label>
+
+          <fieldset className="payment-choice-group">
+            <legend>Payment</legend>
+            <label className={`payment-choice ${!mpesaAvailable ? 'disabled' : ''}`}>
+              <input
+                type="radio"
+                name="paymentChoice"
+                value="MPESA_ON_ORDER"
+                checked={form.paymentChoice === 'MPESA_ON_ORDER'}
+                onChange={handleChange}
+                disabled={!mpesaAvailable}
+              />
+              <span>
+                <strong>Pay on order with M-Pesa</strong>
+                <small>{mpesaAvailable
+                  ? `An STK prompt for ${formatCurrency(total)} will be sent to ${form.phone || 'your phone'} when you place the order.`
+                  : 'M-Pesa STK Push is not configured yet.'}</small>
+              </span>
             </label>
-            <label>
-              Payment method
-              <select name="paymentMethod" value={form.paymentMethod} onChange={handleChange}>
-                <option>M-Pesa</option>
-                <option>Cash</option>
-              </select>
+            <label className="payment-choice">
+              <input
+                type="radio"
+                name="paymentChoice"
+                value="CASH_ON_DELIVERY"
+                checked={form.paymentChoice === 'CASH_ON_DELIVERY'}
+                onChange={handleChange}
+              />
+              <span>
+                <strong>Pay on delivery</strong>
+                <small>Pay {formatCurrency(total)} in cash when your order is delivered.</small>
+              </span>
             </label>
-          </div>
+          </fieldset>
 
           <label>
             Special instructions
             <textarea name="notes" value={form.notes} onChange={handleChange} rows="4" placeholder="Any stains, fabric concerns, or delivery requests?" />
+          </label>
+
+          <label className="legal-consent">
+            <input
+              type="checkbox"
+              name="acceptedTerms"
+              checked={form.acceptedTerms}
+              onChange={handleChange}
+              required
+            />
+            <span>
+              I agree to the <Link to="/terms" target="_blank">Terms and Conditions</Link> and acknowledge the <Link to="/privacy" target="_blank">Privacy Policy</Link>.
+            </span>
           </label>
 
           {error ? <p className="error-text">{error}</p> : null}
@@ -375,13 +433,18 @@ export function OrderTrackingPage() {
   const [orders, setOrders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [paymentErrors, setPaymentErrors] = useState({});
+  const [payingOrder, setPayingOrder] = useState('');
 
   useEffect(() => {
     if (!user) return;
     let active = true;
-    getOrders()
+    const refreshOrders = () => getOrders()
       .then((allOrders) => {
-        if (active) setOrders(allOrders);
+        if (active) {
+          setOrders(allOrders);
+          setError('');
+        }
       })
       .catch((loadError) => {
         if (active) setError(loadError.message);
@@ -389,10 +452,26 @@ export function OrderTrackingPage() {
       .finally(() => {
         if (active) setLoading(false);
       });
+    refreshOrders();
+    const refreshTimer = window.setInterval(refreshOrders, 10000);
     return () => {
       active = false;
+      window.clearInterval(refreshTimer);
     };
   }, [user]);
+
+  const retryPayment = async (orderCode) => {
+    setPayingOrder(orderCode);
+    setPaymentErrors((current) => ({ ...current, [orderCode]: '' }));
+    try {
+      const updatedOrder = await requestMpesaPayment(orderCode);
+      setOrders((current) => current.map((order) => order.id === orderCode ? updatedOrder : order));
+    } catch (paymentError) {
+      setPaymentErrors((current) => ({ ...current, [orderCode]: paymentError.message }));
+    } finally {
+      setPayingOrder('');
+    }
+  };
 
   if (!user) {
     return <Navigate to="/signin" replace />;
@@ -429,6 +508,22 @@ export function OrderTrackingPage() {
                   <span className={`status-tag ${String(order.status).toLowerCase().replace(/\s+/g, '-')}`}>{order.status}</span>
                 </div>
 
+                {order.status === 'In Progress' ? (
+                  <div className="order-approved-notice" role="status" aria-live="polite">
+                    <CheckCircle2 size={18} />
+                    <div>
+                      <span><strong>Order approved.</strong> Our team is taking action and preparing your service.</span>
+                      {order.approvalNotifications?.length ? (
+                        <small>
+                          SMS: {order.approvalNotifications.find((item) => item.channel === 'SMS')?.status || 'PENDING'}
+                          {' · '}
+                          Email: {order.approvalNotifications.find((item) => item.channel === 'EMAIL')?.status || 'PENDING'}
+                        </small>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
                 <div className="tracking-body">
                   {order.scheduledDate ? (
                     <div className="tracking-detail">
@@ -452,9 +547,30 @@ export function OrderTrackingPage() {
                   ) : null}
                   <div className="tracking-detail">
                     <CheckCircle2 size={16} />
-                    <span>{order.paymentMethod}</span>
+                    <span>
+                      {order.paymentMethod === 'M-Pesa' ? 'M-Pesa · pay on order' : 'Cash · pay on delivery'}
+                      {order.paymentStatus === 'PAID' ? ' · Paid' : ''}
+                      {order.paymentStatus === 'PENDING' ? ' · Prompt sent; awaiting payment' : ''}
+                      {order.mpesaReceipt ? ` · Receipt ${order.mpesaReceipt}` : ''}
+                    </span>
                   </div>
                 </div>
+
+                {order.paymentMethod === 'M-Pesa' && order.paymentStatus === 'FAILED' ? (
+                  <div className="payment-retry-panel">
+                    <p className="error-text">{paymentErrors[order.id] || 'The M-Pesa prompt was not completed. You can request a new prompt.'}</p>
+                    {user.role === 'CUSTOMER' ? (
+                      <button
+                        type="button"
+                        className="button secondary-button small-button"
+                        disabled={payingOrder === order.id}
+                        onClick={() => retryPayment(order.id)}
+                      >
+                        {payingOrder === order.id ? 'Sending prompt…' : 'Retry M-Pesa prompt'}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div className="timeline-steps">
                   {['Pending', 'In Progress', 'Picked Up', 'Completed'].map((step) => (

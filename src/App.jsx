@@ -1,8 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './auth';
-import { getOrders, updateOrderStatus } from './api';
+import { getOrders, retryApprovalNotifications, updateOrderStatus } from './api';
 import { OrderCreationPage, CheckoutPage, OrderTrackingPage } from './OrderExperience';
+import { PrivacyPage, TermsPage } from './LegalPages';
 import {
   Area,
   AreaChart,
@@ -68,7 +69,7 @@ const faqs = [
   { q: 'How does pickup and delivery work?', a: 'You can schedule pickup, delivery, or both from the checkout flow. A driver confirms the time and keeps you updated in real time.' },
   { q: 'What is the pricing model?', a: 'Laundry is priced at KSh 99 per kilogram, with clear service add-ons for dry cleaning, ironing, and special garment care.' },
   { q: 'Do you handle delicate items?', a: 'Yes. Our dry cleaning and fabric handling process is designed for suits, curtains, duvet sets, and sensitive materials.' },
-  { q: 'Can I pay using M-Pesa?', a: 'Absolutely. We accept M-Pesa and cash for both in-store and delivery orders, depending on the fulfillment option chosen.' },
+  { q: 'When do I pay for my order?', a: 'Choose an M-Pesa STK Push on order or pay cash on delivery at checkout. The M-Pesa option appears when secure Daraja payments are configured.' },
 ];
 
 const routeAssignments = [
@@ -222,6 +223,8 @@ function AppLayout() {
       <main className="page-shell">
         <Routes>
           <Route path="/" element={<HomePage />} />
+          <Route path="/terms" element={<TermsPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/signin" element={<SignInPage />} />
           <Route path="/signup" element={<SignUpPage />} />
           <Route
@@ -1087,6 +1090,7 @@ function DashboardPage() {
 function AdminPage() {
   const [orders, setOrders] = useState([]);
   const [ordersError, setOrdersError] = useState('');
+  const [retryingNotifications, setRetryingNotifications] = useState('');
 
   useEffect(() => {
     let active = true;
@@ -1117,6 +1121,19 @@ function AdminPage() {
       setOrdersError('');
     } catch (error) {
       setOrdersError(error.message);
+    }
+  };
+
+  const retryNotifications = async (orderCode) => {
+    setRetryingNotifications(orderCode);
+    try {
+      const updatedOrder = await retryApprovalNotifications(orderCode);
+      setOrders((current) => current.map((order) => order.id === orderCode ? updatedOrder : order));
+      setOrdersError('');
+    } catch (error) {
+      setOrdersError(error.message);
+    } finally {
+      setRetryingNotifications('');
     }
   };
 
@@ -1219,6 +1236,17 @@ function AdminPage() {
                   <span>{order.id}</span>
                   <span>{order.items.map((item) => item.name).join(', ')}</span>
                   <span>{order.address}</span>
+                  <span>{order.paymentMethod} · {order.paymentStatus}</span>
+                  {order.approvalNotifications?.some((notice) => notice.status !== 'SENT') ? (
+                    <button
+                      type="button"
+                      className="button secondary-button small-button"
+                      disabled={retryingNotifications === order.id}
+                      onClick={() => retryNotifications(order.id)}
+                    >
+                      {retryingNotifications === order.id ? 'Retrying…' : 'Retry alerts'}
+                    </button>
+                  ) : <span>Alerts sent</span>}
                   <select
                     aria-label={`Status for ${order.id}`}
                     value={order.status}
@@ -1345,6 +1373,8 @@ function Footer() {
             <li>Pricing</li>
             <li>Pickup & delivery</li>
             <li>Support</li>
+            <li><Link to="/terms">Terms and Conditions</Link></li>
+            <li><Link to="/privacy">Privacy Policy</Link></li>
           </ul>
         </div>
         <div>

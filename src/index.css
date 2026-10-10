@@ -145,6 +145,7 @@
 :root[data-theme='dark'] .catalog-card,
 :root[data-theme='dark'] .service-config-panel,
 :root[data-theme='dark'] .tracking-card,
+:root[data-theme='dark'] .legal-page,
 :root[data-theme='dark'] .faq-list details,
 :root[data-theme='dark'] .delivery-item,
 :root[data-theme='dark'] .credentials-box {
@@ -1083,6 +1084,146 @@ faq-list p {
   color: var(--text);
 }
 
+.checkout-card input[type='radio'],
+.checkout-card input[type='checkbox'] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.payment-choice-group {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.payment-choice-group legend {
+  margin-bottom: 8px;
+  color: var(--secondary);
+  font-weight: 700;
+}
+
+.checkout-card .payment-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.payment-choice > span {
+  display: grid;
+  gap: 4px;
+}
+
+.payment-choice small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.payment-choice.disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.checkout-card .legal-consent {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-weight: 400;
+}
+
+.legal-consent a,
+.legal-page a {
+  color: var(--primary);
+  font-weight: 700;
+}
+
+.order-approved-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 13px 14px;
+  border: 1px solid rgba(60, 201, 166, 0.35);
+  border-radius: 14px;
+  background: rgba(60, 201, 166, 0.1);
+  color: var(--text);
+}
+
+.order-approved-notice svg {
+  flex: 0 0 auto;
+  color: #12805c;
+}
+
+.order-approved-notice > div {
+  display: grid;
+  gap: 4px;
+}
+
+.order-approved-notice small {
+  color: var(--muted);
+}
+
+.payment-retry-panel {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.payment-retry-panel .error-text {
+  margin: 0;
+}
+
+.legal-page-shell {
+  padding-top: 48px;
+}
+
+.legal-page {
+  max-width: 860px;
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.legal-page h1 {
+  margin: 8px 0 4px;
+}
+
+.legal-page h2 {
+  margin: 28px 0 8px;
+  color: var(--secondary);
+  font-size: 1.2rem;
+}
+
+.legal-page p,
+.legal-page li {
+  color: var(--muted);
+}
+
+.legal-page li {
+  margin-bottom: 8px;
+}
+
+.legal-effective-date {
+  margin-top: 0;
+  font-size: 0.88rem;
+}
+
+.legal-contact {
+  margin-top: 32px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
 .order-summary-card {
   padding: 22px;
   background: rgba(255, 255, 255, 0.8);
@@ -1295,6 +1436,14 @@ faq-list p {
 .site-footer li {
   margin-bottom: 10px;
   color: rgba(255, 255, 255, 0.7);
+}
+
+.site-footer a {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.site-footer a:hover {
+  color: #fff;
 }
 
 .footer-bottom {
@@ -1655,7 +1804,7 @@ faq-list p {
 }
 
 .admin-row {
-  grid-template-columns: 1fr 1.5fr 1fr 0.8fr;
+  grid-template-columns: 0.7fr 1.1fr 1fr 0.8fr auto 0.7fr;
 }
 
 .order-row strong,

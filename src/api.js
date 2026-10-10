@@ -39,8 +39,20 @@ export async function getOrders() {
   return payload.orders;
 }
 
+export async function getPaymentOptions() {
+  return apiRequest('/payments/options');
+}
+
 export async function createOrder(orderPayload) {
   const payload = await apiRequest('/orders', { method: 'POST', body: orderPayload });
+  return payload;
+}
+
+export async function requestMpesaPayment(orderCode) {
+  const payload = await apiRequest(`/orders/${encodeURIComponent(orderCode)}/payment`, {
+    method: 'POST',
+    body: {},
+  });
   return payload.order;
 }
 
@@ -48,6 +60,14 @@ export async function updateOrderStatus(orderCode, status) {
   const payload = await apiRequest(`/orders/${encodeURIComponent(orderCode)}/status`, {
     method: 'PATCH',
     body: { status },
+  });
+  return payload.order;
+}
+
+export async function retryApprovalNotifications(orderCode) {
+  const payload = await apiRequest(`/orders/${encodeURIComponent(orderCode)}/approval-notifications/retry`, {
+    method: 'POST',
+    body: {},
   });
   return payload.order;
 }
