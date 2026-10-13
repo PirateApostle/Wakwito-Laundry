@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { HashRouter, Link, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { Analytics } from '@vercel/analytics/react';
 import { AuthProvider, useAuth } from './auth';
 import { getOrders, retryApprovalNotifications, updateOrderStatus } from './api';
 import { OrderCreationPage, CheckoutPage, OrderTrackingPage } from './OrderExperience';
@@ -1398,6 +1399,7 @@ export default function App() {
     <AuthProvider>
       <HashRouter>
         <AppLayout />
+        <Analytics />
       </HashRouter>
     </AuthProvider>
   );
