@@ -78,6 +78,51 @@ try {
   assert.equal(signup.response.status, 201);
   assert.equal(signup.body.user.role, 'CUSTOMER');
   assert.match(signup.body.user.username, /^[a-z0-9_]{3,24}$/);
+  assert.equal(signup.body.user.phoneVerified, false);
+
+  const challengeFixture = new Database(databasePath);
+  challengeFixture.prepare(`
+    INSERT INTO phone_verification_challenges (user_id, phone, ip_hash, code_hash, status, expires_at)
+    VALUES (?, ?, 'test-ip-hash', '00', 'SENT', datetime('now', '-1 minute'))
+  `).run(signup.body.user.id, `254${testPhone.slice(1)}`);
+  const invalidPhoneCode = await request('/auth/phone-verification/confirm', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { code: '123456' },
+  });
+  assert.equal(invalidPhoneCode.response.status, 400);
+  assert.match(invalidPhoneCode.body.error, /expired/i);
+  assert.equal(
+    challengeFixture.prepare('SELECT status FROM phone_verification_challenges WHERE user_id = ? ORDER BY id DESC LIMIT 1')
+      .get(signup.body.user.id).status,
+    'EXPIRED',
+  );
+  challengeFixture.prepare(`
+    INSERT INTO phone_verification_challenges (user_id, phone, ip_hash, code_hash, status, attempts, expires_at)
+    VALUES (?, ?, 'test-ip-hash', '00', 'SENT', 5, datetime('now', '+5 minutes'))
+  `).run(signup.body.user.id, `254${testPhone.slice(1)}`);
+  const exhaustedPhoneCode = await request('/auth/phone-verification/confirm', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { code: '123456' },
+  });
+  assert.equal(exhaustedPhoneCode.response.status, 429);
+  assert.equal(
+    challengeFixture.prepare('SELECT status FROM phone_verification_challenges WHERE user_id = ? ORDER BY id DESC LIMIT 1')
+      .get(signup.body.user.id).status,
+    'LOCKED',
+  );
+  challengeFixture.close();
+  const unauthorizedPhoneVerification = await request('/auth/phone-verification', {
+    method: 'POST',
+    body: {},
+  });
+  assert.equal(unauthorizedPhoneVerification.response.status, 401);
+
+  const phoneVerificationFixture = new Database(databasePath);
+  phoneVerificationFixture.prepare('UPDATE users SET phone_verified_at = ? WHERE email = ?')
+    .run(new Date().toISOString(), testEmail);
+  phoneVerificationFixture.close();
 
   const profilePhoto = `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64')}`;
   const profileUpdate = await request('/auth/profile', {
@@ -86,7 +131,7 @@ try {
     body: {
       name: 'Updated Integration Name',
       username: `api_user_${Date.now()}`,
-      phone: `+254${String(Date.now()).slice(-9)}`,
+      phone: '+254712345678',
       location: 'Kilimani, Nairobi',
       profilePhoto,
     },
@@ -95,6 +140,7 @@ try {
   assert.equal(profileUpdate.body.user.name, 'Updated Integration Name');
   assert.equal(profileUpdate.body.user.location, 'Kilimani, Nairobi');
   assert.equal(profileUpdate.body.user.profilePhoto, profilePhoto);
+  assert.equal(profileUpdate.body.user.phoneVerified, false);
   profileUsername = profileUpdate.body.user.username;
 
   const restoredProfile = await request('/auth/me', { cookie: signup.cookie });
@@ -186,14 +232,32 @@ try {
   });
   assert.equal(mismatchedPaymentTiming.response.status, 400);
 
-  if (!paymentOptions.body.mpesaAvailable) {
-    const unavailableMpesa = await request('/orders', {
+  const unverifiedMpesa = await request('/orders', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { ...orderBody, paymentMethod: 'M-Pesa', paymentTiming: 'ORDER' },
+  });
+  assert.equal(unverifiedMpesa.response.status, 403);
+
+  if (!paymentOptions.body.approvalNotifications.sms) {
+    const unavailablePhoneVerification = await request('/auth/phone-verification', {
       method: 'POST',
       cookie: signup.cookie,
-      body: { ...orderBody, paymentMethod: 'M-Pesa', paymentTiming: 'ORDER' },
+      body: {},
     });
-    assert.equal(unavailableMpesa.response.status, 503);
+    assert.equal(unavailablePhoneVerification.response.status, 503);
   }
+
+  const verifiedPhoneFixture = new Database(databasePath);
+  verifiedPhoneFixture.prepare('UPDATE users SET phone_verified_at = ? WHERE email = ?')
+    .run(new Date().toISOString(), testEmail);
+  verifiedPhoneFixture.close();
+  const divertedMpesa = await request('/orders', {
+    method: 'POST',
+    cookie: signup.cookie,
+    body: { ...orderBody, paymentMethod: 'M-Pesa', paymentTiming: 'ORDER' },
+  });
+  assert.equal(divertedMpesa.response.status, 403);
 
   const create = await request('/orders', {
     method: 'POST',
@@ -341,7 +405,7 @@ try {
   });
   assert.equal(deniedUpdate.response.status, 403);
 
-  console.log('API smoke test passed: profiles, pickup scheduling, legal consent persistence, payment choices, approval status, customer scope, and admin updates.');
+  console.log('API smoke test passed: phone verification guards, profiles, scheduling, legal consent, payments, notifications, and order authorization.');
 } finally {
   const database = new Database(databasePath);
   const deleteTestData = database.transaction(() => {

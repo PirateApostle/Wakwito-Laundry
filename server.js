@@ -174,6 +174,24 @@ const userColumns = new Set(database.pragma('table_info(users)').map((column) =>
 if (!userColumns.has('username')) database.exec('ALTER TABLE users ADD COLUMN username TEXT');
 if (!userColumns.has('location')) database.exec("ALTER TABLE users ADD COLUMN location TEXT NOT NULL DEFAULT ''");
 if (!userColumns.has('profile_photo')) database.exec('ALTER TABLE users ADD COLUMN profile_photo TEXT');
+if (!userColumns.has('phone_verified_at')) database.exec('ALTER TABLE users ADD COLUMN phone_verified_at TEXT');
+database.exec(`
+  CREATE TABLE IF NOT EXISTS phone_verification_challenges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    phone TEXT NOT NULL,
+    ip_hash TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('PENDING', 'SENT', 'FAILED', 'USED', 'LOCKED', 'EXPIRED')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS phone_verification_phone_created_idx
+  ON phone_verification_challenges(phone, created_at);
+  CREATE INDEX IF NOT EXISTS phone_verification_ip_created_idx
+  ON phone_verification_challenges(ip_hash, created_at);
+`);
 
 function usernameFromEmail(email) {
   const localPart = email.split('@')[0].toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '');
@@ -263,6 +281,7 @@ function publicUser(user) {
     username: user.username,
     location: user.location,
     profilePhoto: user.profile_photo,
+    phoneVerified: Boolean(user.phone_verified_at),
   };
 }
 
@@ -321,6 +340,11 @@ async function sendApprovalSms(order) {
   const phone = normalizeKenyanPhone(order.phone);
   if (!phone) throw new Error('Customer phone number is not a valid Kenyan mobile number.');
   const message = `Wakwito: Order ${order.order_code} is approved. Our team is now working on your laundry. Track it at ${termsUrl}/#/order-tracking.`;
+  await sendAfricaTalkingSms(phone, message);
+}
+
+async function sendAfricaTalkingSms(phone, message) {
+  if (!smsConfig) throw new Error('Africa’s Talking SMS is not configured.');
   const form = new URLSearchParams({
     username: smsConfig.username,
     to: `+${phone}`,
@@ -342,6 +366,10 @@ async function sendApprovalSms(order) {
   if (!response.ok || recipient?.statusCode !== 101) {
     throw new Error('Africa’s Talking did not confirm SMS delivery.');
   }
+}
+
+function phoneVerificationCodeHash(userId, phone, code) {
+  return crypto.createHmac('sha256', jwtSecret).update(`${userId}:${phone}:${code}`).digest();
 }
 
 async function sendApprovalEmail(order) {
@@ -489,7 +517,7 @@ function authenticate(request, response, next) {
   try {
     const payload = jwt.verify(token, jwtSecret);
     const user = database.prepare(`
-      SELECT id, name, email, phone, role, username, location, profile_photo
+      SELECT id, name, email, phone, role, username, location, profile_photo, phone_verified_at
       FROM users WHERE id = ?
     `).get(payload.sub);
     if (!user) return sendError(response, 401, 'Your session is no longer valid. Please sign in again.');
@@ -653,6 +681,7 @@ function seedDemoData() {
 seedDemoData();
 
 app.disable('x-powered-by');
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 
@@ -709,7 +738,7 @@ app.post('/api/auth/login', (request, response) => {
   if (!identifier || !password) return sendError(response, 400, 'Email/phone and password are required.');
 
   const user = database.prepare(`
-    SELECT id, name, email, phone, role, username, location, profile_photo, password_hash
+    SELECT id, name, email, phone, role, username, location, profile_photo, phone_verified_at, password_hash
     FROM users
     WHERE email = ? COLLATE NOCASE OR phone = ? OR username = ? COLLATE NOCASE
   `).get(identifier, identifier, identifier);
@@ -738,7 +767,7 @@ app.post('/api/auth/signup', (request, response) => {
       INSERT INTO users (name, email, phone, password_hash, role, username)
       VALUES (?, ?, ?, ?, 'CUSTOMER', ?)
     `).run(name, email, phone, bcrypt.hashSync(password, 12), makeUniqueUsername(email));
-    const user = database.prepare('SELECT id, name, email, phone, role, username, location, profile_photo FROM users WHERE id = ?')
+    const user = database.prepare('SELECT id, name, email, phone, role, username, location, profile_photo, phone_verified_at FROM users WHERE id = ?')
       .get(Number(result.lastInsertRowid));
     setSessionCookie(response, user);
     return response.status(201).json({ user: publicUser(user) });
@@ -757,6 +786,100 @@ app.post('/api/auth/logout', (_request, response) => {
 
 app.get('/api/auth/me', authenticate, (request, response) => {
   response.json({ user: publicUser(request.user) });
+});
+
+app.post('/api/auth/phone-verification', authenticate, authorize('CUSTOMER'), async (request, response) => {
+  if (!smsConfig) return sendError(response, 503, 'Phone verification messages are not configured. Contact support to enable M-Pesa.');
+  if (request.user.phone_verified_at) return sendError(response, 409, 'Your account phone number is already verified.');
+
+  const phone = normalizeKenyanPhone(request.user.phone);
+  if (!phone) return sendError(response, 400, 'Add a valid Kenyan mobile number to your account before verifying it.');
+  const ipHash = crypto.createHmac('sha256', jwtSecret).update(String(request.ip || 'unknown')).digest('hex');
+  const recent = database.prepare(`
+    SELECT
+      SUM(CASE WHEN created_at >= datetime('now', '-60 seconds') THEN 1 ELSE 0 END) AS recent_count,
+      SUM(CASE WHEN created_at >= datetime('now', '-1 hour') THEN 1 ELSE 0 END) AS hourly_count
+    FROM phone_verification_challenges
+    WHERE user_id = ? OR phone = ? OR ip_hash = ?
+  `).get(request.user.id, phone, ipHash);
+  if (recent.recent_count > 0) return sendError(response, 429, 'Wait at least 60 seconds before requesting another verification code.');
+  if (recent.hourly_count >= 10) return sendError(response, 429, 'Too many verification requests. Try again in an hour.');
+  const accountRequests = database.prepare(`
+    SELECT COUNT(*) AS count FROM phone_verification_challenges
+    WHERE user_id = ? AND created_at >= datetime('now', '-1 hour')
+  `).get(request.user.id).count;
+  const phoneRequests = database.prepare(`
+    SELECT COUNT(*) AS count FROM phone_verification_challenges
+    WHERE phone = ? AND created_at >= datetime('now', '-1 hour')
+  `).get(phone).count;
+  if (accountRequests >= 3 || phoneRequests >= 5) {
+    return sendError(response, 429, 'Too many verification requests. Try again in an hour.');
+  }
+
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0');
+  const result = database.prepare(`
+    INSERT INTO phone_verification_challenges (user_id, phone, ip_hash, code_hash, status, expires_at)
+    VALUES (?, ?, ?, ?, 'PENDING', datetime('now', '+10 minutes'))
+  `).run(request.user.id, phone, ipHash, phoneVerificationCodeHash(request.user.id, phone, code));
+  try {
+    await sendAfricaTalkingSms(phone, `Your Wakwito phone verification code is ${code}. It expires in 10 minutes. Do not share this code.`);
+    database.prepare("UPDATE phone_verification_challenges SET status = 'SENT' WHERE id = ?").run(result.lastInsertRowid);
+    return response.json({ success: true, message: 'A verification code was sent to your account phone number.' });
+  } catch (error) {
+    database.prepare("UPDATE phone_verification_challenges SET status = 'FAILED' WHERE id = ?").run(result.lastInsertRowid);
+    console.error(`Phone verification SMS failed for account ${request.user.id}: ${error.message}`);
+    return sendError(response, 502, 'We could not send a verification code. Wait a minute and try again.');
+  }
+});
+
+app.post('/api/auth/phone-verification/confirm', authenticate, authorize('CUSTOMER'), (request, response) => {
+  const code = typeof request.body?.code === 'string' ? request.body.code.trim() : '';
+  if (!/^\d{6}$/.test(code)) return sendError(response, 400, 'Enter the six-digit verification code.');
+  const phone = normalizeKenyanPhone(request.user.phone);
+  if (!phone) return sendError(response, 400, 'Add a valid Kenyan mobile number to your account before verifying it.');
+  if (request.user.phone_verified_at) return response.json({ user: publicUser(request.user) });
+
+  const challenge = database.prepare(`
+    SELECT id, code_hash, attempts, expires_at FROM phone_verification_challenges
+    WHERE user_id = ? AND phone = ? AND status = 'SENT'
+    ORDER BY id DESC LIMIT 1
+  `).get(request.user.id, phone);
+  if (!challenge) return sendError(response, 400, 'Request a new verification code before confirming it.');
+  if (Date.parse(`${challenge.expires_at.replace(' ', 'T')}Z`) <= Date.now()) {
+    database.prepare("UPDATE phone_verification_challenges SET status = 'EXPIRED' WHERE id = ?").run(challenge.id);
+    return sendError(response, 400, 'That verification code has expired. Request a new code.');
+  }
+  if (challenge.attempts >= 5) {
+    database.prepare("UPDATE phone_verification_challenges SET status = 'LOCKED' WHERE id = ?").run(challenge.id);
+    return sendError(response, 429, 'Too many incorrect codes. Request a new verification code later.');
+  }
+
+  const submittedHash = phoneVerificationCodeHash(request.user.id, phone, code);
+  const storedHash = Buffer.from(challenge.code_hash, 'hex');
+  const matches = storedHash.length === submittedHash.length && crypto.timingSafeEqual(storedHash, submittedHash);
+  const attempts = challenge.attempts + 1;
+  database.prepare(`
+    UPDATE phone_verification_challenges
+    SET attempts = ?, status = ?
+    WHERE id = ?
+  `).run(attempts, matches ? 'USED' : attempts >= 5 ? 'LOCKED' : 'SENT', challenge.id);
+  if (!matches) {
+    return sendError(response, attempts >= 5 ? 429 : 400, attempts >= 5
+      ? 'Too many incorrect codes. Request a new verification code later.'
+      : 'That verification code is incorrect.');
+  }
+
+  database.prepare('UPDATE users SET phone_verified_at = ? WHERE id = ? AND phone = ?')
+    .run(new Date().toISOString(), request.user.id, request.user.phone);
+  database.prepare(`
+    UPDATE phone_verification_challenges SET status = 'USED'
+    WHERE user_id = ? AND phone = ? AND status = 'SENT'
+  `).run(request.user.id, phone);
+  const user = database.prepare(`
+    SELECT id, name, email, phone, role, username, location, profile_photo, phone_verified_at
+    FROM users WHERE id = ?
+  `).get(request.user.id);
+  return response.json({ user: publicUser(user) });
 });
 
 app.put('/api/auth/profile', authenticate, (request, response) => {
@@ -804,11 +927,13 @@ app.put('/api/auth/profile', authenticate, (request, response) => {
       : 'That phone number is already in use.');
   }
 
+  const phoneVerifiedAt = phone === request.user.phone ? request.user.phone_verified_at : null;
   try {
     database.prepare(`
-      UPDATE users SET name = ?, username = ?, phone = ?, location = ?, profile_photo = ?
+      UPDATE users SET name = ?, username = ?, phone = ?, location = ?, profile_photo = ?,
+        phone_verified_at = ?
       WHERE id = ?
-    `).run(name, username, phone, location, photo, request.user.id);
+    `).run(name, username, phone, location, photo, phoneVerifiedAt, request.user.id);
   } catch (error) {
     if (error.code === 'SQLITE_CONSTRAINT_UNIQUE') {
       return sendError(response, 409, 'That username or phone number is already in use.');
@@ -817,7 +942,7 @@ app.put('/api/auth/profile', authenticate, (request, response) => {
   }
 
   const user = database.prepare(`
-    SELECT id, name, email, phone, role, username, location, profile_photo
+    SELECT id, name, email, phone, role, username, location, profile_photo, phone_verified_at
     FROM users WHERE id = ?
   `).get(request.user.id);
   return response.json({ user: publicUser(user) });
@@ -862,6 +987,18 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), async (request, res
     return sendError(response, 400, 'Choose M-Pesa payment on order or cash payment on delivery.');
   }
   if (acceptedTerms !== true) return sendError(response, 400, 'Accept the Terms and Conditions and Privacy Policy to place an order.');
+  const customerName = String(request.body?.customerName || request.user.name).trim();
+  const submittedPhone = String(request.body?.phone || request.user.phone).trim();
+  if (!customerName || customerName.length > 100) return sendError(response, 400, 'Enter a valid customer name.');
+  if (!/^[+]?[\d\s()-]{7,20}$/.test(submittedPhone)) return sendError(response, 400, 'Enter a valid phone number.');
+  const mpesaPhone = paymentMethod === 'M-Pesa' ? normalizeKenyanPhone(submittedPhone) : null;
+  if (paymentMethod === 'M-Pesa') {
+    const verifiedPhone = request.user.phone_verified_at ? normalizeKenyanPhone(request.user.phone) : null;
+    if (!verifiedPhone) return sendError(response, 403, 'Verify your account phone number before paying with M-Pesa.');
+    if (!mpesaPhone || mpesaPhone !== verifiedPhone) {
+      return sendError(response, 403, 'M-Pesa prompts can only be sent to your verified account phone number.');
+    }
+  }
   if (paymentMethod === 'M-Pesa' && !mpesaConfig) {
     return sendError(response, 503, 'M-Pesa payments are not configured yet. Choose cash on delivery or contact support.');
   }
@@ -896,15 +1033,8 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), async (request, res
   while (database.prepare('SELECT 1 FROM orders WHERE order_code = ?').get(orderCode)) {
     orderCode = `WK-${String(Number(orderCode.slice(3)) + 1).padStart(4, '0')}`;
   }
-  const customerName = String(request.body?.customerName || request.user.name).trim();
-  const phone = String(request.body?.phone || request.user.phone).trim();
+  const phone = paymentMethod === 'M-Pesa' ? request.user.phone : submittedPhone;
   const normalizedMapUrl = mapUrl.trim() || null;
-  if (!customerName || customerName.length > 100) return sendError(response, 400, 'Enter a valid customer name.');
-  if (!/^[+]?[\d\s()-]{7,20}$/.test(phone)) return sendError(response, 400, 'Enter a valid phone number.');
-  const mpesaPhone = paymentMethod === 'M-Pesa' ? normalizeKenyanPhone(phone) : null;
-  if (paymentMethod === 'M-Pesa' && !mpesaPhone) {
-    return sendError(response, 400, 'Enter a valid Kenyan mobile number for the M-Pesa prompt.');
-  }
   const insert = database.prepare(`
     INSERT INTO orders (
       order_code, customer_user_id, customer_name, customer_email, phone, address, map_url,
@@ -961,7 +1091,6 @@ app.post('/api/orders', authenticate, authorize('CUSTOMER'), async (request, res
 });
 
 app.post('/api/orders/:orderCode/payment', authenticate, authorize('CUSTOMER'), async (request, response) => {
-  if (!mpesaConfig) return sendError(response, 503, 'M-Pesa payments are not configured yet.');
   const order = database.prepare(`
     SELECT * FROM orders WHERE order_code = ? AND customer_user_id = ?
   `).get(request.params.orderCode, request.user.id);
@@ -971,11 +1100,12 @@ app.post('/api/orders/:orderCode/payment', authenticate, authorize('CUSTOMER'), 
   }
   if (order.payment_status === 'PAID') return sendError(response, 409, 'This order has already been paid.');
   if (order.payment_status === 'PENDING') return sendError(response, 409, 'An M-Pesa prompt is already pending. Check your phone or wait for it to expire.');
-
-  const mpesaPhone = normalizeKenyanPhone(order.phone);
-  if (!mpesaPhone) return sendError(response, 400, 'Update your account with a valid Kenyan mobile number before retrying payment.');
-  database.prepare("UPDATE orders SET payment_status = 'PENDING', mpesa_phone = ? WHERE id = ?")
-    .run(mpesaPhone, order.id);
+  const mpesaPhone = request.user.phone_verified_at ? normalizeKenyanPhone(request.user.phone) : null;
+  if (!mpesaPhone || mpesaPhone !== order.mpesa_phone) {
+    return sendError(response, 403, 'Verify the account phone number used for this M-Pesa order before retrying payment.');
+  }
+  if (!mpesaConfig) return sendError(response, 503, 'M-Pesa payments are not configured yet.');
+  database.prepare("UPDATE orders SET payment_status = 'PENDING' WHERE id = ?").run(order.id);
   try {
     const payment = await initiateMpesaPayment(normalizeOrder(order), mpesaPhone);
     database.prepare(`

@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, Navigate, useNavigate } from 'react-router-dom';
 import { CalendarDays, CheckCircle2, Clock3, ExternalLink, MapPin, PackageCheck, ShoppingCart, Truck } from 'lucide-react';
-import { clearCart, createOrder, getOrders, getPaymentOptions, readCart, requestMpesaPayment } from './api';
+import {
+  clearCart,
+  createOrder,
+  getOrders,
+  getPaymentOptions,
+  readCart,
+  requestMpesaPayment,
+} from './api';
 import { useAuth } from './auth';
 
 const serviceCatalog = [
@@ -31,6 +38,13 @@ function getDateOffset(offset) {
 }
 
 const timeSlots = ['Morning (8am–12pm)', 'Afternoon (12pm–4pm)', 'Evening (4pm–7pm)'];
+
+function normalizeKenyanPhone(phone = '') {
+  const digits = phone.replace(/\D/g, '');
+  if (/^0[17]\d{8}$/.test(digits)) return `254${digits.slice(1)}`;
+  if (/^254[17]\d{8}$/.test(digits)) return digits;
+  return '';
+}
 
 export function OrderCreationPage() {
   const { user } = useAuth();
@@ -174,12 +188,17 @@ export function OrderCreationPage() {
 }
 
 export function CheckoutPage() {
-  const { user } = useAuth();
+  const { user, requestPhoneVerification, confirmPhoneVerification } = useAuth();
   const navigate = useNavigate();
   const [cart] = useState(() => readCart());
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [mpesaAvailable, setMpesaAvailable] = useState(false);
+  const [verificationSent, setVerificationSent] = useState(false);
+  const [verificationCode, setVerificationCode] = useState('');
+  const [verificationBusy, setVerificationBusy] = useState(false);
+  const [verificationMessage, setVerificationMessage] = useState('');
+  const [verificationError, setVerificationError] = useState('');
   const [form, setForm] = useState({
     customerName: user?.name || '',
     phone: user?.phone || '',
@@ -215,6 +234,8 @@ export function CheckoutPage() {
 
   const subtotal = cart.reduce((sum, item) => sum + Number(item.price || 0), 0);
   const total = subtotal + Math.round(subtotal * 0.08);
+  const verifiedPhoneMatches = Boolean(user?.phoneVerified)
+    && normalizeKenyanPhone(form.phone) === normalizeKenyanPhone(user?.phone);
   const mapsQuery = form.address.trim();
   const mapSearchUrl = mapsQuery
     ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(mapsQuery)}`
@@ -225,7 +246,43 @@ export function CheckoutPage() {
     setForm((current) => ({
       ...current,
       [name]: event.target.type === 'checkbox' ? event.target.checked : value,
+      ...(name === 'phone' && current.paymentChoice === 'MPESA_ON_ORDER'
+        && normalizeKenyanPhone(value) !== normalizeKenyanPhone(user?.phone)
+        ? { paymentChoice: 'CASH_ON_DELIVERY' }
+        : {}),
     }));
+  };
+
+  const handleSendVerification = async () => {
+    setVerificationBusy(true);
+    setVerificationError('');
+    setVerificationMessage('');
+    try {
+      const result = await requestPhoneVerification();
+      setVerificationSent(true);
+      setVerificationMessage(result.message);
+    } catch (verificationRequestError) {
+      setVerificationError(verificationRequestError.message);
+    } finally {
+      setVerificationBusy(false);
+    }
+  };
+
+  const handleConfirmVerification = async () => {
+    setVerificationBusy(true);
+    setVerificationError('');
+    setVerificationMessage('');
+    try {
+      await confirmPhoneVerification(verificationCode);
+      setVerificationSent(false);
+      setVerificationCode('');
+      setForm((current) => ({ ...current, phone: user?.phone || current.phone }));
+      setVerificationMessage('Your account phone number is verified for M-Pesa.');
+    } catch (verificationRequestError) {
+      setVerificationError(verificationRequestError.message);
+    } finally {
+      setVerificationBusy(false);
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -283,6 +340,47 @@ export function CheckoutPage() {
               <input name="phone" value={form.phone} onChange={handleChange} required />
             </label>
           </div>
+          {!user?.phoneVerified ? (
+            <div className="phone-verification-panel">
+              <p>Verify your account phone number to enable M-Pesa. The code is sent only to <strong>{user?.phone}</strong>.</p>
+              {verificationSent ? (
+                <div className="phone-verification-form">
+                  <label>
+                    Six-digit verification code
+                    <input
+                      value={verificationCode}
+                      onChange={(event) => setVerificationCode(event.target.value.replace(/\D/g, '').slice(0, 6))}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          event.preventDefault();
+                          if (verificationCode.length === 6 && !verificationBusy) handleConfirmVerification();
+                        }
+                      }}
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="\d{6}"
+                      maxLength={6}
+                      required
+                    />
+                  </label>
+                  <button type="button" className="button secondary-button" onClick={handleConfirmVerification} disabled={verificationBusy || verificationCode.length !== 6}>
+                    {verificationBusy ? 'Verifying…' : 'Verify phone'}
+                  </button>
+                  <button type="button" className="text-button" onClick={handleSendVerification} disabled={verificationBusy}>
+                    Resend code
+                  </button>
+                </div>
+              ) : (
+                <button type="button" className="button secondary-button" onClick={handleSendVerification} disabled={verificationBusy}>
+                  {verificationBusy ? 'Sending…' : 'Send verification code'}
+                </button>
+              )}
+              {verificationMessage && <p className="success-text" role="status">{verificationMessage}</p>}
+              {verificationError && <p className="error-text" role="alert">{verificationError}</p>}
+            </div>
+          ) : (
+            <p className="phone-verification-status">Account phone verified: {user.phone}</p>
+          )}
 
           <label>
             Pickup or delivery address
@@ -346,20 +444,24 @@ export function CheckoutPage() {
 
           <fieldset className="payment-choice-group">
             <legend>Payment</legend>
-            <label className={`payment-choice ${!mpesaAvailable ? 'disabled' : ''}`}>
+            <label className={`payment-choice ${!mpesaAvailable || !verifiedPhoneMatches ? 'disabled' : ''}`}>
               <input
                 type="radio"
                 name="paymentChoice"
                 value="MPESA_ON_ORDER"
                 checked={form.paymentChoice === 'MPESA_ON_ORDER'}
                 onChange={handleChange}
-                disabled={!mpesaAvailable}
+                disabled={!mpesaAvailable || !verifiedPhoneMatches}
               />
               <span>
                 <strong>Pay on order with M-Pesa</strong>
-                <small>{mpesaAvailable
-                  ? `An STK prompt for ${formatCurrency(total)} will be sent to ${form.phone || 'your phone'} when you place the order.`
-                  : 'M-Pesa STK Push is not configured yet.'}</small>
+                <small>{!mpesaAvailable
+                  ? 'M-Pesa STK Push is not configured yet.'
+                  : !user?.phoneVerified
+                    ? 'Verify your account phone number above to enable M-Pesa.'
+                    : !verifiedPhoneMatches
+                      ? `Use your verified account phone (${user.phone}) for M-Pesa.`
+                      : `An STK prompt for ${formatCurrency(total)} will be sent to your verified phone when you place the order.`}</small>
               </span>
             </label>
             <label className="payment-choice">

@@ -1131,6 +1131,39 @@ faq-list p {
   cursor: not-allowed;
 }
 
+.phone-verification-panel,
+.phone-verification-status {
+  margin: -4px 0 18px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.phone-verification-panel > p,
+.phone-verification-status {
+  color: var(--muted);
+}
+
+.phone-verification-panel > p {
+  margin: 0 0 12px;
+}
+
+.phone-verification-form {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+
+.phone-verification-form label {
+  flex: 1;
+}
+
+.phone-verification-panel .error-text,
+.phone-verification-panel .success-text {
+  margin: 12px 0 0;
+}
+
 .checkout-card .legal-consent {
   display: flex;
   align-items: flex-start;

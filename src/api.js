@@ -77,6 +77,18 @@ export async function updateProfile(profile) {
   return payload.user;
 }
 
+export async function requestPhoneVerification() {
+  return apiRequest('/auth/phone-verification', { method: 'POST', body: {} });
+}
+
+export async function confirmPhoneVerification(code) {
+  const payload = await apiRequest('/auth/phone-verification/confirm', {
+    method: 'POST',
+    body: { code },
+  });
+  return payload.user;
+}
+
 export function readCart() {
   try {
     return JSON.parse(localStorage.getItem('wakwito-cart') || '[]');
